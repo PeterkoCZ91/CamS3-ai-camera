@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>CamS3 5MP</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="page">
+        <div class="pg-header" style="text-align:center;display:block;margin-bottom:20px">
+            <h1 style="font-size:1.6em;letter-spacing:-.02em">CamS3 5MP Kamera</h1>
+            <div class="status-badge" style="margin-top:8px">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Pripojuji...</span>
+            </div>
+        </div>
+
+        <!-- Navigation -->
+        <div class="nav-tabs">
+            <a href="/" class="nav-tab active">Prehled</a>
+            <a href="/settings.html" class="nav-tab">Nastaveni</a>
+            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
+            <a href="/admin.html" class="nav-tab">Admin</a>
+            <a href="/gallery.html" class="nav-tab">Galerie</a>
+        </div>
+
+        <!-- Live Stream -->
+        <div class="stream-container" id="stream-box">
+            <img id="stream-img" src="" alt="Live stream" style="display:none">
+            <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)" id="stream-placeholder">
+                <div style="text-align:center">
+                    <div style="font-size:2em;margin-bottom:8px">&#128247;</div>
+                    <div>Klikni pro spusteni streamu</div>
+                </div>
+            </div>
+            <div class="stream-overlay">
+                <span class="stream-badge" id="fps-badge">-- FPS</span>
+                <span class="stream-badge" id="res-badge">--</span>
+            </div>
+        </div>
+
+        <!-- Stream controls -->
+        <div style="display:flex;gap:10px;margin-bottom:20px">
+            <button class="btn btn-primary btn-block" id="btn-stream" onclick="toggleStream()">
+                Spustit stream
+            </button>
+            <a href="/api/snapshot" class="btn btn-outline" target="_blank" style="flex-shrink:0">
+                Snapshot
+            </a>
+        </div>
+
+        <!-- Info Grid -->
+        <div class="info-grid" id="info">
+            <div class="info-card">
+                <div class="label">IP adresa</div>
+                <div class="value" id="ip">...</div>
+            </div>
+            <div class="info-card">
+                <div class="label">Uptime</div>
+                <div class="value" id="uptime">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label">RAM</div>
+                <div class="value" id="heap">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label">PSRAM</div>
+                <div class="value" id="psram">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label">FPS</div>
+                <div class="value" id="fps">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label">Wi-Fi</div>
+                <div class="value" id="rssi">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label">Firmware</div>
+                <div class="value" id="version">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label">Klienti</div>
+                <div class="value" id="clients">--</div>
+            </div>
+            <div class="info-card" id="card-motion">
+                <div class="label">Pohyb</div>
+                <div class="value" id="motion-status">--</div>
+            </div>
+            <div class="info-card" id="card-face">
+                <div class="label">Obliceje</div>
+                <div class="value" id="face-status">--</div>
+            </div>
+            <div class="info-card" id="card-telegram">
+                <div class="label">Telegram</div>
+                <div class="value" id="telegram-status">--</div>
+            </div>
+        </div>
+
+        <!-- Quick controls -->
+        <div class="controls">
+            <button class="ctrl-btn" id="btn-motion" onclick="toggleMotion()">
+                Detekce pohybu: --
+            </button>
+            <button class="ctrl-btn" id="btn-timelapse" onclick="toggleTimelapse()">
+                Timelapse: --
+            </button>
+            <button class="ctrl-btn" id="btn-face" onclick="toggleFaceDetect()">
+                Obliceje: --
+            </button>
+            <button class="ctrl-btn" id="btn-telegram" onclick="toggleTelegram()">
+                Telegram: --
+            </button>
+            <button class="ctrl-btn" id="btn-led" onclick="toggleLed()">
+                LED: --
+            </button>
+            <a href="/api/status" class="ctrl-btn" target="_blank">
+                Stav JSON
+            </a>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script>
+    let ws = null;
+    let streaming = false;
+    let streamUrl = '';
+
+    function init() {
+        streamUrl = location.protocol + '//' + location.hostname + ':81/stream';
+        connectWebSocket();
+        fetchStatus();
+
+        document.getElementById('stream-box').addEventListener('click', function(e) {
+            if (!streaming && e.target.id !== 'btn-stream') toggleStream();
+        });
+    }
+
+    function connectWebSocket() {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(proto + '//' + location.host + '/ws');
+        ws.onopen = function() {
+            document.getElementById('status-text').textContent = 'Online';
+            document.getElementById('status-dot').className = 'status-dot';
+        };
+        ws.onmessage = function(e) {
+            try { updateUI(JSON.parse(e.data)); } catch(err) {}
+        };
+        ws.onclose = function() {
+            document.getElementById('status-text').textContent = 'Odpojeno';
+            document.getElementById('status-dot').className = 'status-dot error';
+            setTimeout(connectWebSocket, 3000);
+        };
+    }
+
+    function fetchStatus() {
+        fetch('/api/status')
+            .then(r => r.json())
+            .then(updateUI)
+            .catch(() => {});
+        setTimeout(fetchStatus, 5000);
+    }
+
+    function updateUI(d) {
+        setText('ip', d.ip);
+        setText('uptime', d.uptime);
+        setText('heap', Math.floor(d.free_heap/1024) + ' KB');
+        setText('psram', Math.floor(d.free_psram/1024/1024) + ' MB');
+        setText('fps', d.capture_fps ? d.capture_fps.toFixed(1) : '--');
+        setText('rssi', d.rssi ? d.rssi + ' dBm' : 'AP');
+        setText('version', d.version);
+        setText('clients', d.stream_clients || '0');
+        setText('fps-badge', (d.capture_fps ? d.capture_fps.toFixed(1) : '--') + ' FPS');
+
+        // Resolution label
+        const resMap = {5:'QVGA',8:'VGA',9:'SVGA',10:'XGA',12:'SXGA',13:'UXGA'};
+        setText('res-badge', resMap[d.frame_size] || d.frame_size);
+
+        // Motion/face status cards
+        var motionCard = document.getElementById('card-motion');
+        if (d.motion_detected) {
+            setText('motion-status', 'DETEKOVAN');
+            if (motionCard) motionCard.style.borderColor = 'var(--green)';
+        } else {
+            setText('motion-status', d.motion_enabled ? 'Klid' : 'VYP');
+            if (motionCard) motionCard.style.borderColor = '';
+        }
+
+        var faceCard = document.getElementById('card-face');
+        if (d.face_detected && d.face_count > 0) {
+            setText('face-status', d.face_count + 'x');
+            if (faceCard) faceCard.style.borderColor = '#e11d48';
+        } else {
+            setText('face-status', d.face_detect_enabled ? 'Zadny' : 'VYP');
+            if (faceCard) faceCard.style.borderColor = '';
+        }
+
+        // Telegram status card
+        var tgCard = document.getElementById('card-telegram');
+        if (d.telegram_enabled && d.telegram_connected) {
+            setText('telegram-status', 'Pripojeno');
+            if (tgCard) tgCard.style.borderColor = '#0088cc';
+        } else {
+            setText('telegram-status', d.telegram_enabled ? 'Odpojeno' : 'VYP');
+            if (tgCard) tgCard.style.borderColor = '';
+        }
+
+        // Toggle buttons
+        setToggle('btn-motion', 'Detekce pohybu', d.motion_enabled);
+        setToggle('btn-face', 'Obliceje', d.face_detect_enabled);
+        setToggle('btn-telegram', 'Telegram', d.telegram_enabled);
+        setToggle('btn-timelapse', 'Timelapse', d.timelapse_enabled);
+        setToggle('btn-led', 'LED', d.led_enabled);
+    }
+
+    function setText(id, val) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = val;
+    }
+
+    function setToggle(id, label, val) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = label + ': ' + (val ? 'ZAP' : 'VYP');
+        el.className = 'ctrl-btn' + (val ? ' active' : '');
+    }
+
+    function toggleStream() {
+        var img = document.getElementById('stream-img');
+        var ph = document.getElementById('stream-placeholder');
+        var btn = document.getElementById('btn-stream');
+
+        if (streaming) {
+            img.src = '';
+            img.style.display = 'none';
+            ph.style.display = 'flex';
+            btn.textContent = 'Spustit stream';
+            btn.className = 'btn btn-primary btn-block';
+            streaming = false;
+        } else {
+            img.src = streamUrl;
+            img.style.display = 'block';
+            ph.style.display = 'none';
+            btn.textContent = 'Zastavit stream';
+            btn.className = 'btn btn-danger btn-block';
+            streaming = true;
+        }
+    }
+
+    function toggleMotion() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            return fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({motion_enabled: !d.motion_enabled})
+            });
+        }).then(() => showToast('Nastaveni uplateno', 'success'));
+    }
+
+    function toggleTimelapse() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            return fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({timelapse_enabled: !d.timelapse_enabled})
+            });
+        }).then(() => showToast('Nastaveni uplateno', 'success'));
+    }
+
+    function toggleFaceDetect() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            return fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({face_detect_enabled: !d.face_detect_enabled})
+            });
+        }).then(() => showToast('Nastaveni uplateno', 'success'));
+    }
+
+    function toggleTelegram() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            return fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({telegram_enabled: !d.telegram_enabled})
+            });
+        }).then(() => showToast('Nastaveni uplateno', 'success'));
+    }
+
+    function toggleLed() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            return fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({led_enabled: !d.led_enabled})
+            });
+        }).then(() => showToast('LED prepnuto', 'success'));
+    }
+
+    function showToast(text, type) {
+        var t = document.getElementById('toast');
+        t.textContent = text;
+        t.className = 'toast ' + type + ' show';
+        setTimeout(function() { t.className = 'toast'; }, 3000);
+    }
+
+    init();
+    </script>
+</body>
+</html>

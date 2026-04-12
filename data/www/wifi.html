@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Wi-Fi - CamS3</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="page">
+        <div class="pg-header">
+            <h1>Wi-Fi konfigurace</h1>
+            <a href="/" class="back-link">Zpet</a>
+        </div>
+
+        <div class="nav-tabs">
+            <a href="/" class="nav-tab">Prehled</a>
+            <a href="/settings.html" class="nav-tab">Nastaveni</a>
+            <a href="/wifi.html" class="nav-tab active">Wi-Fi</a>
+            <a href="/admin.html" class="nav-tab">Admin</a>
+            <a href="/gallery.html" class="nav-tab">Galerie</a>
+        </div>
+
+        <!-- Current status -->
+        <div class="card" style="margin-bottom:20px">
+            <div class="card-body">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                    <span style="font-weight:600;color:#fff">Aktualni pripojeni</span>
+                    <span class="status-badge" id="wifi-status">
+                        <span class="status-dot" id="wifi-dot"></span>
+                        <span id="wifi-mode">--</span>
+                    </span>
+                </div>
+                <div class="info-grid" style="margin-bottom:0">
+                    <div class="info-card">
+                        <div class="label">IP</div>
+                        <div class="value" id="wifi-ip">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">RSSI</div>
+                        <div class="value" id="wifi-rssi">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">MAC</div>
+                        <div class="value" id="wifi-mac" style="font-size:.75em">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Hostname</div>
+                        <div class="value" id="wifi-hostname">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scan networks -->
+        <div class="card">
+            <div class="card-body">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                    <span style="font-weight:600;color:#fff">Dostupne site</span>
+                    <button class="btn btn-outline btn-sm" onclick="scanNetworks()">
+                        Vyhledat
+                    </button>
+                </div>
+                <div id="network-list" style="color:var(--text-muted);font-size:.9em">
+                    Klikni "Vyhledat" pro nacteni siti
+                </div>
+            </div>
+        </div>
+
+        <!-- Manual connect -->
+        <details style="margin-top:12px">
+            <summary><span class="sec-color" style="background:var(--accent)"></span> Rucni pripojeni</summary>
+            <div class="sec-body">
+                <div class="fg">
+                    <label for="manual-ssid">SSID</label>
+                    <input type="text" id="manual-ssid" placeholder="Nazev site">
+                </div>
+                <div class="fg">
+                    <label for="manual-pass">Heslo</label>
+                    <input type="password" id="manual-pass" placeholder="Heslo site">
+                </div>
+                <button class="btn btn-primary btn-block" onclick="connectManual()">
+                    Pripojit
+                </button>
+            </div>
+        </details>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+    function loadStatus() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            document.getElementById('wifi-ip').textContent = d.ip || '--';
+            document.getElementById('wifi-rssi').textContent = d.rssi ? d.rssi + ' dBm' : 'N/A';
+            document.getElementById('wifi-mac').textContent = d.mac || '--';
+            document.getElementById('wifi-hostname').textContent = d.hostname || '--';
+            document.getElementById('wifi-mode').textContent = d.wifi_mode || '--';
+            const dot = document.getElementById('wifi-dot');
+            dot.className = 'status-dot' + (d.wifi_mode === 'STA' ? '' : ' warning');
+        });
+    }
+
+    function scanNetworks() {
+        const list = document.getElementById('network-list');
+        list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">Vyhledavam...</div>';
+
+        fetch('/api/wifi/scan').then(r => r.json()).then(networks => {
+            if (!networks.length) {
+                list.innerHTML = '<div style="padding:12px;color:var(--text-muted)">Zadne site nenalezeny</div>';
+                return;
+            }
+
+            let html = '';
+            networks.sort((a, b) => b.rssi - a.rssi);
+            networks.forEach(n => {
+                const strength = n.rssi > -50 ? 'Vyborny' : n.rssi > -70 ? 'Dobry' : 'Slaby';
+                const lock = n.enc ? '&#128274;' : '&#128275;';
+                html += '<div class="file-item" style="cursor:pointer" onclick="selectNetwork(\'' +
+                    n.ssid.replace(/'/g, "\\'") + '\')">' +
+                    '<div><div class="file-name">' + lock + ' ' + n.ssid + '</div>' +
+                    '<div class="file-size">' + n.rssi + ' dBm - ' + strength + '</div></div>' +
+                    '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();selectNetwork(\'' +
+                    n.ssid.replace(/'/g, "\\'") + '\')">Pripojit</button></div>';
+            });
+            list.innerHTML = html;
+        }).catch(() => {
+            list.innerHTML = '<div style="padding:12px;color:var(--red)">Chyba pri vyhledavani</div>';
+        });
+    }
+
+    function selectNetwork(ssid) {
+        document.getElementById('manual-ssid').value = ssid;
+        document.getElementById('manual-pass').value = '';
+        document.getElementById('manual-pass').focus();
+        // Open manual connect section
+        document.querySelector('details').open = true;
+    }
+
+    function connectManual() {
+        const ssid = document.getElementById('manual-ssid').value;
+        const pass = document.getElementById('manual-pass').value;
+        if (!ssid) { showToast('Zadejte SSID', 'error'); return; }
+
+        showToast('Pripojuji k ' + ssid + '...', 'info');
+
+        fetch('/api/wifi', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ssid: ssid, password: pass})
+        })
+        .then(r => r.json())
+        .then(result => {
+            showToast(result.message, result.success ? 'success' : 'error');
+            if (result.success) {
+                setTimeout(() => { showToast('Kamera se pripojuje, stranka muze byt nedostupna...', 'info'); }, 2000);
+            }
+        })
+        .catch(() => showToast('Chyba pripojeni', 'error'));
+    }
+
+    function showToast(text, type) {
+        const t = document.getElementById('toast');
+        t.textContent = text;
+        t.className = 'toast ' + type + ' show';
+        setTimeout(() => t.className = 'toast', 4000);
+    }
+
+    loadStatus();
+    </script>
+</body>
+</html>

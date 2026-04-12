@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin - CamS3</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="page">
+        <div class="pg-header">
+            <h1>Administrace</h1>
+            <a href="/" class="back-link">Zpet</a>
+        </div>
+
+        <div class="nav-tabs">
+            <a href="/" class="nav-tab">Prehled</a>
+            <a href="/settings.html" class="nav-tab">Nastaveni</a>
+            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
+            <a href="/admin.html" class="nav-tab active">Admin</a>
+            <a href="/gallery.html" class="nav-tab">Galerie</a>
+        </div>
+
+        <!-- System Info -->
+        <details open>
+            <summary><span class="sec-color" style="background:var(--accent)"></span> Systemove informace</summary>
+            <div class="sec-body">
+                <div class="info-grid">
+                    <div class="info-card">
+                        <div class="label">Firmware</div>
+                        <div class="value" id="sys-version">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">CPU</div>
+                        <div class="value" id="sys-cpu">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Uptime</div>
+                        <div class="value" id="sys-uptime">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Free Heap</div>
+                        <div class="value" id="sys-heap">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Free PSRAM</div>
+                        <div class="value" id="sys-psram">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Total PSRAM</div>
+                        <div class="value" id="sys-psram-total">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Flash</div>
+                        <div class="value" id="sys-flash">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">SDK</div>
+                        <div class="value" id="sys-sdk" style="font-size:.7em">--</div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <!-- Camera Info -->
+        <details>
+            <summary><span class="sec-color" style="background:var(--purple)"></span> Kamera</summary>
+            <div class="sec-body">
+                <div class="info-grid">
+                    <div class="info-card">
+                        <div class="label">Sensor PID</div>
+                        <div class="value" id="cam-pid">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">FPS</div>
+                        <div class="value" id="cam-fps">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Celkem snimku</div>
+                        <div class="value" id="cam-count">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Chyby</div>
+                        <div class="value" id="cam-errors">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Stream klienti</div>
+                        <div class="value" id="cam-clients">--</div>
+                    </div>
+                </div>
+                <button class="btn btn-outline btn-block" style="margin-top:10px" onclick="reinitCamera()">
+                    Reinicializovat kameru
+                </button>
+            </div>
+        </details>
+
+        <!-- SD Card -->
+        <details>
+            <summary><span class="sec-color" style="background:var(--yellow)"></span> SD karta</summary>
+            <div class="sec-body">
+                <div class="info-grid">
+                    <div class="info-card">
+                        <div class="label">Stav</div>
+                        <div class="value" id="sd-status">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Celkem</div>
+                        <div class="value" id="sd-total">--</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">Pouzito</div>
+                        <div class="value" id="sd-used">--</div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <!-- OTA Update -->
+        <details>
+            <summary><span class="sec-color" style="background:var(--green)"></span> OTA aktualizace</summary>
+            <div class="sec-body">
+                <p style="font-size:.85em;color:var(--text-dim);margin-bottom:16px">
+                    Aktualizace firmware pres webove rozhrani. Nahrajte soubor .bin pro firmware
+                    nebo .bin pro filesystem (LittleFS).
+                </p>
+                <a href="/update" class="btn btn-primary btn-block" target="_blank">
+                    Otevrit OTA stranku
+                </a>
+            </div>
+        </details>
+
+        <!-- Actions -->
+        <details>
+            <summary><span class="sec-color" style="background:var(--red)"></span> Systemove akce</summary>
+            <div class="sec-body">
+                <div style="display:flex;flex-direction:column;gap:10px">
+                    <button class="btn btn-outline btn-block" onclick="confirmReboot()">
+                        Restartovat zarizeni
+                    </button>
+                    <button class="btn btn-danger btn-block" onclick="confirmReset()">
+                        Tovarni reset
+                    </button>
+                </div>
+                <p style="font-size:.75em;color:var(--text-muted);margin-top:12px">
+                    Tovarni reset smaze veskerou konfiguraci a restartuje zarizeni do AP rezimu.
+                </p>
+            </div>
+        </details>
+
+        <!-- API Documentation -->
+        <details>
+            <summary><span class="sec-color" style="background:#64748b"></span> API endpointy</summary>
+            <div class="sec-body" style="font-size:.82em;color:var(--text-dim)">
+                <div style="font-family:monospace;line-height:2">
+                    <div><strong>GET</strong> /api/status - Stav systemu (JSON)</div>
+                    <div><strong>GET</strong> /api/snapshot - Snapshot (JPEG)</div>
+                    <div><strong>GET</strong> :81/stream - MJPEG stream</div>
+                    <div><strong>POST</strong> /api/settings - Zmena nastaveni</div>
+                    <div><strong>GET</strong> /api/wifi/scan - Scan siti</div>
+                    <div><strong>POST</strong> /api/wifi - Pripojeni k siti</div>
+                    <div><strong>POST</strong> /api/reboot - Restart</div>
+                    <div><strong>POST</strong> /api/reset - Factory reset</div>
+                    <div><strong>POST</strong> /api/camera/reinit - Reinit kamery</div>
+                    <div><strong>GET</strong> /api/sd/list?path=/ - SD karta</div>
+                    <div><strong>GET</strong> /api/sd/download?file= - Stahnout</div>
+                    <div><strong>DELETE</strong> /api/sd/delete?file= - Smazat</div>
+                    <div><strong>WS</strong> /ws - WebSocket (real-time status)</div>
+                </div>
+            </div>
+        </details>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <!-- Confirmation dialog -->
+    <div id="confirm-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;
+         display:none;align-items:center;justify-content:center;padding:20px">
+        <div style="background:#1a1a2e;border:1px solid var(--border);border-radius:16px;padding:24px;max-width:400px;width:100%">
+            <h3 style="color:#fff;margin-bottom:12px" id="confirm-title">Potvrzeni</h3>
+            <p style="color:var(--text-dim);margin-bottom:20px;font-size:.9em" id="confirm-text"></p>
+            <div style="display:flex;gap:10px">
+                <button class="btn btn-outline" style="flex:1" onclick="closeConfirm()">Zrusit</button>
+                <button class="btn btn-danger" style="flex:1" id="confirm-btn" onclick="">Potvrdit</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function loadInfo() {
+        fetch('/api/status').then(r => r.json()).then(d => {
+            document.getElementById('sys-version').textContent = d.version;
+            document.getElementById('sys-cpu').textContent = d.cpu_freq + ' MHz';
+            document.getElementById('sys-uptime').textContent = d.uptime;
+            document.getElementById('sys-heap').textContent = Math.floor(d.free_heap/1024) + ' KB';
+            document.getElementById('sys-psram').textContent = Math.floor(d.free_psram/1024/1024) + ' MB';
+            document.getElementById('sys-psram-total').textContent = Math.floor(d.total_psram/1024/1024) + ' MB';
+            document.getElementById('sys-flash').textContent = Math.floor(d.flash_size/1024/1024) + ' MB';
+            document.getElementById('sys-sdk').textContent = d.sdk;
+
+            document.getElementById('cam-pid').textContent = d.sensor_pid ? '0x' + d.sensor_pid.toString(16).toUpperCase() : 'N/A';
+            document.getElementById('cam-fps').textContent = d.capture_fps ? d.capture_fps.toFixed(1) : '--';
+            document.getElementById('cam-count').textContent = d.capture_count || '0';
+            document.getElementById('cam-errors').textContent = d.capture_errors || '0';
+            document.getElementById('cam-clients').textContent = d.stream_clients || '0';
+
+            document.getElementById('sd-status').textContent = d.sd_mounted ? 'Pripojeno' : 'Nepripojeno';
+            document.getElementById('sd-total').textContent = d.sd_total_mb ? d.sd_total_mb + ' MB' : '--';
+            document.getElementById('sd-used').textContent = d.sd_used_mb !== undefined ? d.sd_used_mb + ' MB' : '--';
+        });
+    }
+
+    function reinitCamera() {
+        fetch('/api/camera/reinit', {method:'POST'})
+            .then(r => r.json())
+            .then(d => showToast(d.message, d.success ? 'success' : 'error'));
+    }
+
+    let confirmAction = null;
+    function showConfirm(title, text, action) {
+        document.getElementById('confirm-title').textContent = title;
+        document.getElementById('confirm-text').textContent = text;
+        document.getElementById('confirm-overlay').style.display = 'flex';
+        confirmAction = action;
+        document.getElementById('confirm-btn').onclick = function() {
+            closeConfirm();
+            if (confirmAction) confirmAction();
+        };
+    }
+    function closeConfirm() {
+        document.getElementById('confirm-overlay').style.display = 'none';
+    }
+
+    function confirmReboot() {
+        showConfirm('Restart zarizeni', 'Opravdu chcete restartovat kameru? Stream bude prerusen.', function() {
+            fetch('/api/reboot', {method:'POST'}).then(() => showToast('Restartuji...', 'info'));
+        });
+    }
+
+    function confirmReset() {
+        showConfirm('Tovarni reset', 'POZOR: Veskerou konfiguraci se smaze! Zarizeni se prepne do AP rezimu. Pokracovat?', function() {
+            fetch('/api/reset', {method:'POST'}).then(() => showToast('Resetuji...', 'info'));
+        });
+    }
+
+    function showToast(text, type) {
+        const t = document.getElementById('toast');
+        t.textContent = text;
+        t.className = 'toast ' + type + ' show';
+        setTimeout(() => t.className = 'toast', 3000);
+    }
+
+    loadInfo();
+    setInterval(loadInfo, 5000);
+    </script>
+</body>
+</html>

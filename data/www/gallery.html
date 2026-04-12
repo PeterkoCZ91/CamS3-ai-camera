@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Galerie - CamS3</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/style.css">
+    <style>
+        .breadcrumb {
+            display: flex; align-items: center; gap: 6px;
+            margin-bottom: 16px; font-size: .85em;
+            color: var(--text-muted); flex-wrap: wrap;
+        }
+        .breadcrumb a { color: var(--accent); text-decoration: none; }
+        .breadcrumb a:hover { text-decoration: underline; }
+        .breadcrumb span { color: var(--text-muted); }
+        .empty-state {
+            text-align: center; padding: 48px 20px;
+            color: var(--text-muted);
+        }
+        .empty-state .icon { font-size: 2.5em; margin-bottom: 12px; }
+        .thumb-preview {
+            width: 48px; height: 48px; border-radius: 6px;
+            object-fit: cover; background: var(--bg-card);
+            border: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="pg-header">
+            <h1>SD Galerie</h1>
+            <a href="/" class="back-link">Zpet</a>
+        </div>
+
+        <div class="nav-tabs">
+            <a href="/" class="nav-tab">Prehled</a>
+            <a href="/settings.html" class="nav-tab">Nastaveni</a>
+            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
+            <a href="/admin.html" class="nav-tab">Admin</a>
+            <a href="/gallery.html" class="nav-tab active">Galerie</a>
+        </div>
+
+        <!-- Breadcrumb -->
+        <div class="breadcrumb" id="breadcrumb">
+            <a href="#" onclick="navigate('/')">SD</a>
+        </div>
+
+        <!-- File list -->
+        <div class="card">
+            <div id="file-list">
+                <div class="empty-state">
+                    <div class="icon">&#128193;</div>
+                    <div>Nacitam...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Preview overlay -->
+        <div id="preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);
+             z-index:300;align-items:center;justify-content:center;padding:20px;cursor:pointer"
+             onclick="closePreview()">
+            <img id="preview-img" style="max-width:100%;max-height:90vh;border-radius:8px" src="">
+            <div style="position:absolute;top:16px;right:16px">
+                <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();closePreview()">Zavrit</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+    let currentPath = '/';
+
+    function navigate(path) {
+        currentPath = path;
+        loadFiles(path);
+        updateBreadcrumb(path);
+    }
+
+    function updateBreadcrumb(path) {
+        const bc = document.getElementById('breadcrumb');
+        let html = '<a href="#" onclick="navigate(\'/\')">SD</a>';
+        if (path !== '/') {
+            const parts = path.split('/').filter(p => p);
+            let acc = '';
+            parts.forEach((p, i) => {
+                acc += '/' + p;
+                const isLast = i === parts.length - 1;
+                html += ' <span>/</span> ';
+                if (isLast) {
+                    html += '<span style="color:var(--text)">' + p + '</span>';
+                } else {
+                    html += '<a href="#" onclick="navigate(\'' + acc + '\')">' + p + '</a>';
+                }
+            });
+        }
+        bc.innerHTML = html;
+    }
+
+    function loadFiles(path) {
+        const container = document.getElementById('file-list');
+        container.innerHTML = '<div class="empty-state"><div>Nacitam...</div></div>';
+
+        fetch('/api/sd/list?path=' + encodeURIComponent(path))
+            .then(r => {
+                if (!r.ok) throw new Error('SD karta neni dostupna');
+                return r.json();
+            })
+            .then(files => {
+                if (!files.length) {
+                    container.innerHTML = '<div class="empty-state"><div class="icon">&#128193;</div><div>Prazdna slozka</div></div>';
+                    return;
+                }
+
+                // Sort: directories first, then by name
+                files.sort((a, b) => {
+                    if (a.dir !== b.dir) return b.dir - a.dir;
+                    return a.name.localeCompare(b.name);
+                });
+
+                let html = '<ul class="file-list">';
+                files.forEach(f => {
+                    const fullPath = (currentPath === '/' ? '/' : currentPath + '/') + f.name;
+                    const sizeStr = f.dir ? '--' : formatSize(f.size);
+                    const isImage = /\.(jpg|jpeg|png|bmp)$/i.test(f.name);
+
+                    html += '<li class="file-item">';
+                    html += '<div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">';
+
+                    if (f.dir) {
+                        html += '<div style="font-size:1.5em">&#128193;</div>';
+                        html += '<div style="min-width:0"><div class="file-name" style="cursor:pointer" onclick="navigate(\'' +
+                            fullPath + '\')">' + f.name + '</div>';
+                        html += '<div class="file-size">slozka</div></div>';
+                    } else {
+                        if (isImage) {
+                            html += '<img class="thumb-preview" src="/api/sd/download?file=' +
+                                encodeURIComponent(fullPath) + '" loading="lazy" onclick="showPreview(\'' +
+                                fullPath + '\')" style="cursor:pointer">';
+                        } else {
+                            html += '<div style="font-size:1.5em">&#128196;</div>';
+                        }
+                        html += '<div style="min-width:0"><div class="file-name">' + f.name + '</div>';
+                        html += '<div class="file-size">' + sizeStr + '</div></div>';
+                    }
+                    html += '</div>';
+
+                    if (!f.dir) {
+                        html += '<div class="file-actions">';
+                        html += '<a class="btn btn-outline btn-sm" href="/api/sd/download?file=' +
+                            encodeURIComponent(fullPath) + '" download>Stahnout</a>';
+                        html += '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' +
+                            fullPath.replace(/'/g, "\\'") + '\')">Smazat</button>';
+                        html += '</div>';
+                    }
+
+                    html += '</li>';
+                });
+                html += '</ul>';
+                container.innerHTML = html;
+            })
+            .catch(err => {
+                container.innerHTML = '<div class="empty-state"><div class="icon" style="color:var(--red)">&#9888;</div>' +
+                    '<div>' + err.message + '</div></div>';
+            });
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+        return (bytes/1024/1024).toFixed(1) + ' MB';
+    }
+
+    function showPreview(path) {
+        document.getElementById('preview-img').src = '/api/sd/download?file=' + encodeURIComponent(path);
+        document.getElementById('preview-overlay').style.display = 'flex';
+    }
+
+    function closePreview() {
+        document.getElementById('preview-overlay').style.display = 'none';
+        document.getElementById('preview-img').src = '';
+    }
+
+    function deleteFile(path) {
+        if (!confirm('Smazat soubor ' + path + '?')) return;
+
+        fetch('/api/sd/delete?file=' + encodeURIComponent(path), {method:'DELETE'})
+            .then(r => r.json())
+            .then(d => {
+                if (d.success) {
+                    showToast('Soubor smazan', 'success');
+                    loadFiles(currentPath);
+                } else {
+                    showToast('Chyba: ' + (d.message || 'neznama'), 'error');
+                }
+            })
+            .catch(() => showToast('Chyba pri mazani', 'error'));
+    }
+
+    function showToast(text, type) {
+        const t = document.getElementById('toast');
+        t.textContent = text;
+        t.className = 'toast ' + type + ' show';
+        setTimeout(() => t.className = 'toast', 3000);
+    }
+
+    navigate('/');
+    </script>
+</body>
+</html>
