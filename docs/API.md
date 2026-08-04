@@ -85,9 +85,9 @@ not originate from a page in somebody's browser.
 Consequence for integrators: a script needs no token, but must also not send an
 `Origin` header. A browser page must send the token.
 
-Note that `POST /ir-control` and `POST /record` call `requireAuth()` but **not**
-`requireCsrf()` — they are stubs that change no state (see section 5.9), so there is
-nothing to forge.
+`POST /ir-control` and `POST /record` are stubs that change no state, but they go
+through `requireCsrf()` as well — the policy is uniform across every mutating handler
+so that wiring one of them up later cannot silently leave a gap.
 
 ## 4. Request body limits
 
@@ -629,8 +629,8 @@ Reply: `{"success":true,"message":"Background model reset"}`.
 | GET | `/api/csrf` | **yes** | – | `{"token":"<32 hex chars>"}` |
 | POST | `/api/reboot` | **yes** | **yes** | `{"success":true,"message":"Rebooting..."}` |
 | POST | `/api/reset` | **yes** | **yes** | `{"success":true,"message":"Factory reset, rebooting..."}` |
-| POST | `/record` | **yes** | no | `501` |
-| POST | `/ir-control` | **yes** | no | Stub, see below |
+| POST | `/record` | **yes** | yes (browser-originated) | `501` |
+| POST | `/ir-control` | **yes** | yes (browser-originated) | Stub, see below |
 | GET | `/ir-status` | no | – | Stub |
 | GET | `/audio-status` | no | – | Stub |
 
