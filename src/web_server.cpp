@@ -1153,22 +1153,77 @@ static void handleCompatJson(AsyncWebServerRequest* request) {
     request->send(200, "application/json", buildStatusJson());
 }
 
+// GET /health — the liveness endpoint external monitors poll.
+//
+// The field names here are a contract, not a free choice: the A12 companion reads
+// overall_health, power_health, uptime_seconds, last_restart_reason_name and
+// power_restarts_* and raises alerts from them. This endpoint used to emit none of
+// those (and an always-empty `issues`), so A12's entire health and power alerting
+// path was silently dead against this firmware — it polled, parsed, found nothing
+// actionable and stayed quiet. Renaming or dropping a field below breaks a monitor
+// that has no way to tell you it went blind.
 static void handleHealth(AsyncWebServerRequest* request) {
     JsonDocument doc;
-    doc["ok"] = true;
-    doc["uptime_sec"] = millis() / 1000;
-    doc["free_heap"] = ESP.getFreeHeap();
+
+    uint32_t uptimeSec = millis() / 1000;
+    uint32_t freeHeap  = ESP.getFreeHeap();
+    uint32_t frameAge  = getFrameAgeMs();
+
+    // Collect concrete complaints; `issues` is what a monitor shows the operator, so
+    // it has to say what is wrong rather than just that something is.
+    String issues;
+    auto addIssue = [&issues](const char* what) {
+        if (issues.length()) issues += "; ";
+        issues += what;
+    };
+
+    if (!isWiFiConnected())              addIssue("wifi down");
+    if (getCaptureCount() == 0)          addIssue("no frame captured since boot");
+    else if (frameAge > 10000)           addIssue("stale frame (>10s)");
+    if (getCaptureFps() < 0.1f)          addIssue("capture stalled");
+    if (freeHeap < 40 * 1024)            addIssue("low heap");
+    #ifdef INCLUDE_SD_CARD
+    if (sdStoreDisabled())               addIssue("sd writes disabled");
+    #endif
+
+    bool degraded = issues.length() > 0;
+
+    doc["ok"] = !degraded;
+    doc["overall_health"] = degraded ? "degraded" : "ok";
+    doc["issues"] = issues;
+
+    doc["uptime_sec"] = uptimeSec;
+    doc["uptime_seconds"] = uptimeSec;   // name A12 reads
+    doc["free_heap"] = freeHeap;
     doc["free_psram"] = ESP.getFreePsram();
     doc["wifi_connected"] = isWiFiConnected();
     doc["wifi_rssi"] = getRSSI();
     doc["capture_fps"] = getCaptureFps();
     doc["capture_errors"] = getCaptureErrors();
-    doc["frame_age_ms"] = getFrameAgeMs();
+    doc["ring_dropped"] = getRingDroppedFrames();
+    doc["frame_age_ms"] = frameAge;
     doc["stream_clients"] = getStreamClientCount();
     doc["detection_clients"] = getDetectionStreamClientCount();
-    doc["reset_reason"] = resetReasonName(sysStats.last_reset_reason);
+
+    // Restart history. "suspect" means the restart pattern points at the power
+    // supply rather than at software: a brownout was recorded, or the board came up
+    // from a bare power-on without anyone asking for a reboot. A monitor combines
+    // this with uptime to decide whether the problem is current or historical.
+    const char* reasonName = resetReasonName(sysStats.last_reset_reason);
+    bool powerSuspect = sysStats.brownout_restarts > 0 ||
+                        sysStats.last_reset_reason == ESP_RST_BROWNOUT ||
+                        (sysStats.last_reset_reason == ESP_RST_POWERON &&
+                         sysStats.total_restarts > 1);
+
+    doc["reset_reason"] = reasonName;
+    doc["last_restart_reason_name"] = reasonName;   // name A12 reads
     doc["total_restarts"] = sysStats.total_restarts;
-    doc["issues"] = "";
+    doc["power_health"] = powerSuspect ? "suspect" : "ok";
+    doc["power_restarts_poweron"]  = sysStats.poweron_restarts;
+    doc["power_restarts_brownout"] = sysStats.brownout_restarts;
+    doc["wdt_restarts"] = sysStats.wdt_restarts;
+    doc["panic_restarts"] = sysStats.panic_restarts;
+
     String result;
     serializeJson(doc, result);
     request->send(200, "application/json", result);

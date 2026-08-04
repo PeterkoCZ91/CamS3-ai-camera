@@ -53,14 +53,29 @@ There are two MJPEG routes on port 81 and they are not interchangeable:
 A12 polls `/health`. Treat the camera as usable when it reports:
 
 ```
+ok              == true          (equivalently overall_health == "ok")
 wifi_connected  == true
 capture_fps     >  0
 frame_age_ms    <  10000
 capture_errors  not increasing over time
 ```
 
-`/health` also carries `reset_reason` and `total_restarts`, which is how you notice a
-camera that is technically answering but rebooting in a loop.
+When something is wrong, `issues` names it — `wifi down`, `stale frame (>10s)`,
+`capture stalled`, `low heap`, `sd writes disabled` — so an alert can say what broke
+instead of just that something did.
+
+`/health` also carries the restart history: `total_restarts`, per-cause counters and
+`power_health`, which turns `"suspect"` when the restart pattern points at the power
+supply rather than at software. Combined with `uptime_seconds` this distinguishes a
+camera that is browning out right now from one that did so last month.
+
+**Field naming:** the endpoint emits `uptime_seconds`, `overall_health`,
+`power_health`, `last_restart_reason_name` and `power_restarts_poweron` /
+`power_restarts_brownout` — the exact names A12 reads — alongside the shorter
+firmware-native forms (`uptime_sec`, `reset_reason`). Earlier firmware emitted only
+the short forms, so A12 polled `/health`, found nothing it recognised, and its health
+and power alerts never fired. If you change these names, A12 goes quiet without
+reporting a problem.
 
 `/a12/status` is the same picture plus detection state, stream URLs and capture
 configuration, and it computes an `ok` flag for you (Wi-Fi up AND at least one frame

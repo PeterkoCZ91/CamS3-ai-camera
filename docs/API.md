@@ -136,15 +136,35 @@ Legend: **Auth** = Basic Auth required. **CSRF** = `X-CSRF-Token` required
 
 ```json
 {
-  "ok": true, "uptime_sec": 4211, "free_heap": 132840, "free_psram": 7154176,
-  "wifi_connected": true, "wifi_rssi": -58, "capture_fps": 14.9,
-  "capture_errors": 0, "frame_age_ms": 62, "stream_clients": 1,
-  "detection_clients": 0, "reset_reason": "SOFTWARE", "total_restarts": 12,
-  "issues": ""
+  "ok": true, "overall_health": "ok", "issues": "",
+  "uptime_sec": 4211, "uptime_seconds": 4211,
+  "free_heap": 132840, "free_psram": 7154176,
+  "wifi_connected": true, "wifi_rssi": -58,
+  "capture_fps": 14.9, "capture_errors": 0, "ring_dropped": 0,
+  "frame_age_ms": 62, "stream_clients": 1, "detection_clients": 0,
+  "reset_reason": "SOFTWARE", "last_restart_reason_name": "SOFTWARE",
+  "total_restarts": 12, "power_health": "ok",
+  "power_restarts_poweron": 3, "power_restarts_brownout": 0,
+  "wdt_restarts": 1, "panic_restarts": 0
 }
 ```
 
-`issues` is always an empty string — reserved, not yet populated.
+**These field names are a contract.** External monitors read them; renaming or
+dropping one breaks a monitor that cannot report that it went blind.
+
+| Field | Meaning |
+|---|---|
+| `ok` / `overall_health` | `false` / `"degraded"` when `issues` is non-empty |
+| `issues` | Semicolon-separated list of concrete complaints: `wifi down`, `no frame captured since boot`, `stale frame (>10s)`, `capture stalled`, `low heap`, `sd writes disabled`. Empty when healthy. |
+| `uptime_sec`, `uptime_seconds` | The same value under both names |
+| `reset_reason`, `last_restart_reason_name` | The same value under both names — `POWERON`, `BROWNOUT`, `TASK_WDT`, `PANIC`, `SOFTWARE`, … |
+| `power_health` | `"suspect"` when the restart pattern points at the power supply rather than at software: a brownout has been recorded, this boot *was* a brownout, or the board came up from a bare power-on more than once. Combine with `uptime_seconds` to tell a current problem from a historical one. |
+| `power_restarts_poweron`, `power_restarts_brownout`, `wdt_restarts`, `panic_restarts` | Per-cause counters, persisted across reboots |
+
+The duplicated names exist because the A12 companion reads `uptime_seconds`,
+`last_restart_reason_name`, `overall_health`, `power_health` and `power_restarts_*`.
+Emitting only the short forms meant its health and power alerting never fired against
+this firmware.
 
 `GET /a12/status` — a flattened subset for an external integration (see
 [`A12_INTEGRATION.md`](A12_INTEGRATION.md)). `ok` is `true` only when WiFi is connected, at
