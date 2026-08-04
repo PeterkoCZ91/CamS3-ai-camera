@@ -41,8 +41,10 @@ There are two MJPEG routes on port 81 and they are not interchangeable:
   can tell an automated consumer apart from someone watching the dashboard.
 - Either route being connected switches the capture task to `active_fps`, so A12 alone
   keeps the frame rate up — nobody has to leave a browser open.
-- Each MJPEG part carries `X-Timestamp` and `X-Frame-Age` headers, so A12 can drop
-  stale frames instead of spending inference on them.
+- Each MJPEG part carries `X-Timestamp` and `X-Frame-Age` headers. A12 does not read
+  them today — its parser scans for JPEG markers and ignores the part headers — so it
+  timestamps every frame at arrival. The headers are there for whoever wants to tell a
+  fresh frame from one that sat in a socket buffer.
 - The stream never re-sends a frame it already sent: it waits for a newer entry in the
   ring buffer. Duplicate-frame analysis is wasted GPU time.
 - The route is capped at 2 concurrent clients (`MAX_DETECTION_STREAM_CLIENTS`), so a
