@@ -1,12 +1,17 @@
 #include "face_detect.h"
+#include "ws_log.h"
 
 #if defined(INCLUDE_FACE_DETECT) && defined(INCLUDE_MOTION_DETECT)
 
 #include "config.h"
 #include "camera_manager.h"
+#include "cz_text.h"
+#include "image_utils.h"
 #include "motion_detect.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_task_wdt.h>
+#include <esp_heap_caps.h>
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "human_face_detect_msr01.hpp"
@@ -14,20 +19,24 @@
 
 #ifdef INCLUDE_SD_CARD
 #include <SD.h>
+#include "sd_store.h"
 #endif
 
 #ifdef INCLUDE_TELEGRAM
 #include "telegram.h"
 #endif
 
+#ifdef INCLUDE_EVENT_LOG
+#include "event_log.h"
+#endif
+
 static const char* TAG = "FaceDet";
 
-// Decode buffer for face detection (1/8 scale for speed, closer to model sweet spot)
-// Max input: 1600x1200 / 8 = 200x150, RGB565 = 60000 bytes
-// Note: 200x150 is close to model's optimal ~120x160 and much faster than 400x300
-#define FACE_DECODE_MAX_W  200
-#define FACE_DECODE_MAX_H  150
-#define FACE_DECODE_BUF_SIZE (FACE_DECODE_MAX_W * FACE_DECODE_MAX_H * 2)
+// Decode buffer for face detection (1/8 scale for speed, closer to model sweet spot).
+// Sized for the sensor's largest frame (QSXGA / 8 = 320x240) so no frame_size can
+// overflow it — the old 256x160 sizing came from a frame_size table that lacked
+// QXGA/QSXGA entries and silently fell through to a too-small "default".
+#define FACE_DECODE_BUF_SIZE IMG_DECODE_MAX_SZ
 
 static uint8_t* faceDecodeBuf = NULL;
 
@@ -42,11 +51,14 @@ static volatile uint32_t faceEventCount = 0;
 static FaceDetectResult lastResult = {};
 static portMUX_TYPE faceMux = portMUX_INITIALIZER_UNLOCKED;
 
-void faceDetectInit() {
-    faceDecodeBuf = (uint8_t*)ps_malloc(FACE_DECODE_BUF_SIZE);
+bool faceDetectInit() {
+    // esp-dl tie728 SIMD kernels require 16-byte aligned input; plain ps_malloc
+    // is only 4-byte aligned, which triggered LoadStoreError in MSR01's first
+    // depthwise conv (EXCVADDR landing in I-cache space on unaligned vector load).
+    faceDecodeBuf = (uint8_t*)heap_caps_aligned_alloc(16, FACE_DECODE_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!faceDecodeBuf) {
-        Serial.printf("[%s] Failed to allocate decode buffer (%d bytes)\n", TAG, FACE_DECODE_BUF_SIZE);
-        return;
+        logCapture("[%s] Failed to allocate decode buffer (%d bytes)\n", TAG, FACE_DECODE_BUF_SIZE);
+        return false;
     }
 
     // Create detectors following Espressif CameraWebServer pattern:
@@ -68,14 +80,17 @@ void faceDetectInit() {
         );
     }
 
-    Serial.printf("[%s] Face detection initialized (two_stage=%s)\n",
+    logCapture("[%s] Face detection initialized (two_stage=%s)\n",
                   TAG, detector2 ? "yes" : "no");
+    return detector1 != NULL;
 }
 
 void faceDetectTask(void* param) {
-    Serial.printf("[%s] Face detection task started\n", TAG);
+    logCapture("[%s] Face detection task started\n", TAG);
+    esp_task_wdt_add(NULL);
 
     while (true) {
+        esp_task_wdt_reset();
         // Check if face detection is enabled
         if (!appConfig.face_detect.enabled || !detector1) {
             faceDetected = false;
@@ -102,18 +117,34 @@ void faceDetectTask(void* param) {
             }
         }
 
-        // Get latest frame
+        // Get latest frame, with the dimensions it was captured at
         const uint8_t* buf = NULL;
         size_t len = 0;
-        if (!ringBufferGetLatest(&buf, &len)) {
+        uint16_t srcW = 0, srcH = 0;
+        int rh = ringBufferGetLatest(&buf, &len, &srcW, &srcH);
+        if (rh < 0) {
             vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        // Bound-check before decoding — jpg2rgb565 has no output limit.
+        int decW = 0, decH = 0;
+        if (!imgDecodeFits(srcW, srcH, FACE_DECODE_BUF_SIZE, decW, decH)) {
+            ringBufferRelease(rh);
+            logCapture("[%s] Frame %ux%u would decode to %dx%d, over buffer — skipping\n",
+                          TAG, srcW, srcH, decW, decH);
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
         uint32_t t0 = millis();
 
-        // Decode JPEG to RGB565 at 1/8 scale (fast, close to model's optimal input size)
-        bool decoded = jpg2rgb565(buf, len, faceDecodeBuf, JPG_SCALE_8X);
+        // Decode JPEG to RGB565 at 1/8 scale. tjpgd isn't reentrant → serialize.
+        bool decoded = false;
+        if (cameraDecodeLock()) {
+            decoded = jpg2rgb565(buf, len, faceDecodeBuf, JPG_SCALE_8X);
+            cameraDecodeUnlock();
+        }
 
         // Copy JPEG data for potential SD save before releasing ring buffer
         uint8_t* saveBuf = NULL;
@@ -128,7 +159,7 @@ void faceDetectTask(void* param) {
         }
         #endif
 
-        ringBufferRelease();
+        ringBufferRelease(rh);
 
         if (!decoded) {
             if (saveBuf) free(saveBuf);
@@ -136,21 +167,7 @@ void faceDetectTask(void* param) {
             continue;
         }
 
-        // Determine decoded image dimensions based on source resolution
-        // JPG_SCALE_8X divides dimensions by 8 (integer division)
-        int decW, decH;
-        switch (appConfig.camera.frame_size) {
-            case 18: decW = 240; decH = 135; break;  // FHD 1920x1080
-            case 13: decW = 200; decH = 150; break;  // UXGA 1600x1200
-            case 12: decW = 160; decH = 128; break;  // SXGA 1280x1024
-            case 10: decW = 128; decH = 96;  break;  // XGA 1024x768
-            case 9:  decW = 100; decH = 75;  break;  // SVGA 800x600
-            case 8:  decW = 80;  decH = 60;  break;  // VGA 640x480
-            case 5:  decW = 40;  decH = 30;  break;  // QVGA 320x240
-            default: decW = 160; decH = 120; break;
-        }
-
-        // Stage 1: MSR01 detection
+        // Stage 1: MSR01 detection (decW/decH validated before the decode)
         std::list<dl::detect::result_t>& results1 =
             detector1->infer<uint16_t>((uint16_t*)faceDecodeBuf, {decH, decW, 3});
 
@@ -198,26 +215,33 @@ void faceDetectTask(void* param) {
             faceDetected = true;
             lastFaceTime = millis();
             faceEventCount++;
-            Serial.printf("[%s] %d face(s) detected (%.2f score, %dms, event #%lu)\n",
+            logCapture("[%s] %d face(s) detected (%.2f score, %dms, event #%lu)\n",
                           TAG, faceCount, result.largest_score, inferenceMs, faceEventCount);
 
+            #ifdef INCLUDE_EVENT_LOG
+            {
+                char detail[EVENT_DETAIL_LEN];
+                snprintf(detail, sizeof(detail), "n=%d score=%.2f %lums",
+                         faceCount, result.largest_score, (unsigned long)inferenceMs);
+                logEvent(EVT_FACE, detail);
+            }
+            #endif
+
             #ifdef INCLUDE_SD_CARD
-            if (saveBuf && saveLen > 0 && SD.cardType() != CARD_NONE) {
-                char filename[64];
-                snprintf(filename, sizeof(filename), "/captures/face_%lu.jpg", millis());
-                File f = SD.open(filename, FILE_WRITE);
-                if (f) {
-                    f.write(saveBuf, saveLen);
-                    f.close();
-                    Serial.printf("[%s] Saved to %s\n", TAG, filename);
-                }
+            if (saveBuf && saveLen > 0 && sdStoreAvailable()) {
+                sdStoreWriteJpeg("/captures", "face_", saveBuf, saveLen);
             }
             #endif
 
             #ifdef INCLUDE_TELEGRAM
             if (appConfig.telegram.enabled && appConfig.telegram.notify_on_face && isWithinActiveHours()) {
+                // Czech agrees the verb and the noun with the count, so build both
+                // forms instead of the old "1 oblicej/u" slash placeholder.
                 char caption[64];
-                snprintf(caption, sizeof(caption), "Oblicej detekovan (%d oblicej/u)", faceCount);
+                snprintf(caption, sizeof(caption), "%s %d %s",
+                         czPlural(faceCount, "Detekován", "Detekovány", "Detekováno"),
+                         faceCount,
+                         czPlural(faceCount, "obličej", "obličeje", "obličejů"));
                 if (appConfig.telegram.photo_on_face && saveBuf && saveLen > 0) {
                     telegramSendPhoto(saveBuf, saveLen, caption);
                 } else {

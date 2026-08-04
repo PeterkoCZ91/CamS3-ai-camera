@@ -5,30 +5,37 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Ring buffer in BSS (static allocation, ~20KB)
-static char logRing[LOG_RING_LINES][LOG_LINE_MAX_LEN];
+// Ring buffer in PSRAM — see the note in ws_log.h about DRAM pressure.
+typedef char LogLine[LOG_LINE_MAX_LEN];
+static LogLine* logRing = NULL;
 static int logHead = 0;      // Next write position
 static int logCount = 0;     // Total lines stored (max LOG_RING_LINES)
 static SemaphoreHandle_t logMutex = NULL;
 
 void logInit() {
     logMutex = xSemaphoreCreateMutex();
-    memset(logRing, 0, sizeof(logRing));
     logHead = 0;
     logCount = 0;
+
+    logRing = (LogLine*)ps_calloc(LOG_RING_LINES, sizeof(LogLine));
+    if (!logRing) {
+        // No PSRAM (or it is exhausted): keep logging to Serial, just without
+        // history. Better than failing to boot or eating 25 kB of DRAM.
+        Serial.println("[Log] PSRAM ring allocation failed — /log history disabled");
+    }
 }
 
 void logCapture(const char* fmt, ...) {
-    if (!logMutex) return;
-
     char buf[LOG_LINE_MAX_LEN];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    // Also print to Serial
+    // Serial always gets the line, even before logInit() ran or without PSRAM.
     Serial.print(buf);
+
+    if (!logMutex || !logRing) return;
 
     // Strip trailing newline for clean storage
     int len = strlen(buf);
@@ -47,7 +54,7 @@ void logCapture(const char* fmt, ...) {
 }
 
 char* logGetAll() {
-    if (!logMutex) return NULL;
+    if (!logMutex || !logRing) return NULL;
 
     // Allocate in PSRAM: worst case LOG_RING_LINES * (LOG_LINE_MAX_LEN + 1)
     size_t maxSize = LOG_RING_LINES * (LOG_LINE_MAX_LEN + 1);

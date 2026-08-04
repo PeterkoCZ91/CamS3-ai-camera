@@ -14,7 +14,7 @@ struct FaceDetectResult {
     uint32_t inference_ms;  // Last inference time
 };
 
-void faceDetectInit();
+bool faceDetectInit();
 void faceDetectTask(void* param);
 bool isFaceDetected();
 unsigned long getLastFaceTime();

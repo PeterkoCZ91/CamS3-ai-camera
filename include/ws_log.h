@@ -3,11 +3,17 @@
 
 #include <Arduino.h>
 
-// Ring buffer log capture — intercepts Serial.printf style output
-// and stores last LOG_RING_LINES lines for web access
+// Ring buffer log capture. logCapture() is the project's logging entry point:
+// it echoes to Serial *and* keeps the last LOG_RING_LINES lines so /log and
+// /log-viewer have something to show. Modules must call logCapture() rather than
+// Serial.printf() — otherwise the ring stays empty, which is exactly how those two
+// endpoints ended up always returning nothing.
+//
+// The ring lives in PSRAM (25 kB), not in BSS, because internal DRAM is the scarce
+// resource on this board (async web server + TLS + camera buffers all fight for it).
 
 #define LOG_RING_LINES    100
-#define LOG_LINE_MAX_LEN  200
+#define LOG_LINE_MAX_LEN  256
 
 // Initialize the log ring buffer
 void logInit();

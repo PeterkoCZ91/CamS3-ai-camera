@@ -1,4 +1,5 @@
 #include "telegram.h"
+#include "ws_log.h"
 
 #ifdef INCLUDE_TELEGRAM
 
@@ -7,10 +8,25 @@
 #include "wifi_manager.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <esp_task_wdt.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+
+#ifdef INCLUDE_SD_CARD
+#include <SD.h>
+#include <FS.h>
+#define TG_PENDING_DIR       "/telegram_pending"
+#define TG_PENDING_MAX       50     // cap so we don't fill the card
+#define TG_PENDING_MAGIC     0x54475057UL  // "TGPW"
+struct TgPendingHeader {
+    uint32_t magic;
+    uint32_t caption_len;   // bytes, no null terminator
+    uint32_t jpeg_len;      // bytes
+    uint32_t reserved;
+};
+#endif
 
 static const char* TAG = "Telegram";
 
@@ -31,6 +47,142 @@ struct TelegramMessage {
 static QueueHandle_t tgQueue = NULL;
 static int64_t lastUpdateId = 0;
 static unsigned long lastTgSendTime = 0;
+
+// Silent mode — when non-zero, notifications are suppressed until this
+// millis() timestamp, after which an auto-resume message is sent.
+// Runtime-only (lost across reboot on purpose — safer default).
+static unsigned long silentUntilMs = 0;
+static bool silentSavedNotifyMotion = false;
+static bool silentSavedNotifyFace   = false;
+static bool silentSavedNotifyPerson = false;
+
+// Forward decls used by the boot sequence / command menu
+#ifdef INCLUDE_MQTT
+#include "mqtt_handler.h"
+#endif
+static bool sendTextSync(const char* text);
+static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* caption);
+static void registerBotCommands();
+static void sendBootMessage();
+
+#ifdef INCLUDE_SD_CARD
+// Spill a photo to SD with a small header so one file carries the full
+// caption+payload. Used when the in-RAM queue is full or the send fails.
+static bool persistPhotoToSd(const uint8_t* jpeg, size_t jpegLen, const char* caption) {
+    if (SD.cardType() == CARD_NONE) return false;
+    if (!SD.exists(TG_PENDING_DIR)) SD.mkdir(TG_PENDING_DIR);
+
+    // Rotate: if we already have too many, drop the oldest.
+    {
+        File dir = SD.open(TG_PENDING_DIR);
+        if (dir) {
+            int count = 0;
+            String oldest;
+            uint64_t oldestMtime = UINT64_MAX;
+            File f = dir.openNextFile();
+            while (f) {
+                count++;
+                time_t t = f.getLastWrite();
+                if ((uint64_t)t < oldestMtime) { oldestMtime = t; oldest = String(f.name()); }
+                f.close();
+                f = dir.openNextFile();
+            }
+            dir.close();
+            if (count >= TG_PENDING_MAX && oldest.length()) {
+                String path = String(TG_PENDING_DIR) + "/" + oldest;
+                SD.remove(path);
+                logCapture("[%s] SD queue full, dropped oldest %s\n", TAG, oldest.c_str());
+            }
+        }
+    }
+
+    char path[96];
+    snprintf(path, sizeof(path), "%s/%lu.tgp", TG_PENDING_DIR, (unsigned long)millis());
+    File out = SD.open(path, FILE_WRITE);
+    if (!out) return false;
+
+    TgPendingHeader hdr = {
+        .magic = TG_PENDING_MAGIC,
+        .caption_len = (uint32_t)(caption ? strlen(caption) : 0),
+        .jpeg_len = (uint32_t)jpegLen,
+        .reserved = 0,
+    };
+    size_t w = out.write((const uint8_t*)&hdr, sizeof(hdr));
+    if (caption && hdr.caption_len) w += out.write((const uint8_t*)caption, hdr.caption_len);
+    w += out.write(jpeg, jpegLen);
+    out.close();
+
+    bool ok = (w == sizeof(hdr) + hdr.caption_len + jpegLen);
+    if (!ok) { SD.remove(path); return false; }
+    logCapture("[%s] Photo spilled to SD: %s (%u bytes)\n", TAG, path, (unsigned)jpegLen);
+    return true;
+}
+
+// Pop the oldest pending file and try to send it. Returns true if one
+// was processed (sent OR unrecoverable + deleted); caller can call again
+// to drain multiple per cycle.
+static bool flushOnePendingFromSd() {
+    if (SD.cardType() == CARD_NONE) return false;
+    if (!SD.exists(TG_PENDING_DIR)) return false;
+
+    // Find oldest by mtime.
+    File dir = SD.open(TG_PENDING_DIR);
+    if (!dir) return false;
+    String oldest;
+    uint64_t oldestMtime = UINT64_MAX;
+    File f = dir.openNextFile();
+    while (f) {
+        time_t t = f.getLastWrite();
+        if ((uint64_t)t < oldestMtime) { oldestMtime = t; oldest = String(f.name()); }
+        f.close();
+        f = dir.openNextFile();
+    }
+    dir.close();
+    if (!oldest.length()) return false;
+
+    String path = String(TG_PENDING_DIR) + "/" + oldest;
+    File in = SD.open(path, FILE_READ);
+    if (!in) return false;
+
+    TgPendingHeader hdr;
+    if (in.read((uint8_t*)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != TG_PENDING_MAGIC) {
+        in.close();
+        SD.remove(path);
+        logCapture("[%s] Dropped corrupted pending %s\n", TAG, oldest.c_str());
+        return true;
+    }
+
+    // Bound sanity: 2 MB JPEG / 512 B caption.
+    if (hdr.jpeg_len > 2 * 1024 * 1024 || hdr.caption_len > 512) {
+        in.close();
+        SD.remove(path);
+        return true;
+    }
+
+    char caption[513] = {};
+    if (hdr.caption_len) {
+        in.read((uint8_t*)caption, hdr.caption_len);
+        caption[hdr.caption_len] = 0;
+    }
+
+    uint8_t* jpeg = (uint8_t*)ps_malloc(hdr.jpeg_len);
+    if (!jpeg) { in.close(); return false; }  // try again next cycle when heap eases
+    in.read(jpeg, hdr.jpeg_len);
+    in.close();
+
+    bool sent = sendPhotoSync(jpeg, hdr.jpeg_len, caption);
+    free(jpeg);
+
+    if (sent) {
+        SD.remove(path);
+        lastTgSendTime = millis();
+        logCapture("[%s] Flushed pending %s (%u bytes)\n", TAG, oldest.c_str(), (unsigned)hdr.jpeg_len);
+    } else {
+        logCapture("[%s] Flush failed for %s — will retry\n", TAG, oldest.c_str());
+    }
+    return sent;
+}
+#endif  // INCLUDE_SD_CARD
 
 // --- Active hours helper ---
 
@@ -61,7 +213,7 @@ static bool sendTextSync(const char* text) {
     client.setInsecure();
 
     if (!http.begin(client, url)) {
-        Serial.printf("[%s] HTTP begin failed\n", TAG);
+        logCapture("[%s] HTTP begin failed\n", TAG);
         return false;
     }
 
@@ -80,10 +232,10 @@ static bool sendTextSync(const char* text) {
     http.end();
 
     if (code == 200) {
-        Serial.printf("[%s] Text sent OK\n", TAG);
+        logCapture("[%s] Text sent OK\n", TAG);
         return true;
     }
-    Serial.printf("[%s] sendMessage failed: %d\n", TAG, code);
+    logCapture("[%s] sendMessage failed: %d\n", TAG, code);
     return false;
 }
 
@@ -94,7 +246,7 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
     client.setInsecure();
 
     if (!client.connect("api.telegram.org", 443)) {
-        Serial.printf("[%s] TLS connect failed\n", TAG);
+        logCapture("[%s] TLS connect failed\n", TAG);
         return false;
     }
 
@@ -138,7 +290,7 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
         size_t chunk = min((size_t)1024, jpegLen - sent);
         size_t written = client.write(jpeg + sent, chunk);
         if (written == 0) {
-            Serial.printf("[%s] Photo write stalled at %u/%u\n", TAG, sent, jpegLen);
+            logCapture("[%s] Photo write stalled at %u/%u\n", TAG, sent, jpegLen);
             client.stop();
             return false;
         }
@@ -160,12 +312,12 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
         String statusLine = client.readStringUntil('\n');
         success = statusLine.indexOf("200") >= 0;
         if (!success) {
-            Serial.printf("[%s] sendPhoto failed: %s\n", TAG, statusLine.c_str());
+            logCapture("[%s] sendPhoto failed: %s\n", TAG, statusLine.c_str());
         } else {
-            Serial.printf("[%s] Photo sent OK (%u bytes)\n", TAG, jpegLen);
+            logCapture("[%s] Photo sent OK (%u bytes)\n", TAG, jpegLen);
         }
     } else {
-        Serial.printf("[%s] sendPhoto timeout\n", TAG);
+        logCapture("[%s] sendPhoto timeout\n", TAG);
     }
 
     client.stop();
@@ -175,48 +327,49 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
 // --- Command handling ---
 
 static void handleCommand(const String& cmd, const String& args) {
-    Serial.printf("[%s] Command: /%s %s\n", TAG, cmd.c_str(), args.c_str());
+    logCapture("[%s] Command: /%s %s\n", TAG, cmd.c_str(), args.c_str());
 
     if (cmd == "foto" || cmd == "photo") {
         const uint8_t* buf = NULL;
         size_t len = 0;
-        if (ringBufferGetLatest(&buf, &len)) {
+        int rh = ringBufferGetLatest(&buf, &len);
+        if (rh >= 0) {
             // Copy to PSRAM for sync send
             uint8_t* copy = (uint8_t*)ps_malloc(len);
             if (copy) {
                 memcpy(copy, buf, len);
-                ringBufferRelease();
+                ringBufferRelease(rh);
                 sendPhotoSync(copy, len, "Snapshot");
                 free(copy);
             } else {
-                ringBufferRelease();
+                ringBufferRelease(rh);
                 sendTextSync("Chyba: nedostatek PSRAM");
             }
         } else {
-            sendTextSync("Zadny snimek k dispozici");
+            sendTextSync("Žádný snímek k dispozici");
         }
     }
     else if (cmd == "status" || cmd == "stav") {
         char buf[640];
         snprintf(buf, sizeof(buf),
-            "<b>CamS3 Status</b>\n"
+            "<b>CamS3 — stav</b>\n"
             "IP: %s\n"
             "Uptime: %lus\n"
             "Heap: %dKB\n"
             "PSRAM: %dMB\n"
             "WiFi RSSI: %d dBm\n"
             "FPS: %.1f\n"
-            "Stream klientu: %d\n"
+            "Stream klientů: %d\n"
             "Pohyb: %s\n"
-            "Obliceje: %s\n"
+            "Obličeje: %s\n"
             "Osoby (FOMO): %s\n"
-            "TG notify pohyb: %s\n"
-            "TG notify obliceje: %s\n"
-            "TG notify osoby: %s\n"
-            "Prah pohybu: %d\n"
+            "Telegram – pohyb: %s\n"
+            "Telegram – obličeje: %s\n"
+            "Telegram – osoby: %s\n"
+            "Práh pohybu: %d\n"
             "Cooldown: %ds\n"
-            "Aktivni hodiny: %d-%d\n"
-            "Poll interval: %dms",
+            "Aktivní hodiny: %d–%d\n"
+            "Interval dotazů: %d ms",
             getIPAddress().c_str(),
             millis() / 1000,
             ESP.getFreeHeap() / 1024,
@@ -242,31 +395,33 @@ static void handleCommand(const String& cmd, const String& args) {
         appConfig.telegram.notify_on_motion = !appConfig.telegram.notify_on_motion;
         saveConfig();
         sendTextSync(appConfig.telegram.notify_on_motion ?
-            "TG notifikace pohybu: ZAP" : "TG notifikace pohybu: VYP");
+            "Telegram – pohyb: ZAP" : "Telegram – pohyb: VYP");
     }
     else if (cmd == "obliceje") {
         appConfig.telegram.notify_on_face = !appConfig.telegram.notify_on_face;
         saveConfig();
         sendTextSync(appConfig.telegram.notify_on_face ?
-            "TG notifikace obliceju: ZAP" : "TG notifikace obliceju: VYP");
+            "Telegram – obličeje: ZAP" : "Telegram – obličeje: VYP");
     }
     else if (cmd == "osoba") {
         appConfig.telegram.notify_on_person = !appConfig.telegram.notify_on_person;
         saveConfig();
         sendTextSync(appConfig.telegram.notify_on_person ?
-            "TG notifikace osob: ZAP" : "TG notifikace osob: VYP");
+            "Telegram – osoby: ZAP" : "Telegram – osoby: VYP");
     }
     else if (cmd == "prah") {
         int val = args.toInt();
-        if (val >= 5 && val <= 50) {
+        // Same range the HTTP API clamps to (see handleApiSettings) — the two used
+        // to disagree, so /prah 60 was rejected while the web UI accepted it.
+        if (val >= 5 && val <= 80) {
             appConfig.motion.threshold = val;
             saveConfig();
             char buf[64];
-            snprintf(buf, sizeof(buf), "Prah pohybu nastaven na %d", val);
+            snprintf(buf, sizeof(buf), "Práh pohybu nastaven na %d", val);
             sendTextSync(buf);
         } else {
             char buf[64];
-            snprintf(buf, sizeof(buf), "Pouziti: /prah N (5-50, nyni: %d)", appConfig.motion.threshold);
+            snprintf(buf, sizeof(buf), "Použití: /prah N (5–80, nyní %d)", appConfig.motion.threshold);
             sendTextSync(buf);
         }
     }
@@ -283,17 +438,59 @@ static void handleCommand(const String& cmd, const String& args) {
         appConfig.face_detect.enabled = true;
         appConfig.person_detect.enabled = true;
         saveConfig();
-        sendTextSync("Rezim HLIDEJ aktivovan (vse ZAP, 24/7)");
+        sendTextSync("Režim HLÍDEJ aktivován (vše ZAP, 24/7)");
     }
     else if (cmd == "ticho") {
-        appConfig.telegram.notify_on_motion = false;
-        appConfig.telegram.notify_on_face = false;
-        appConfig.telegram.notify_on_person = false;
-        appConfig.telegram.photo_on_motion = false;
-        appConfig.telegram.photo_on_face = false;
-        appConfig.telegram.photo_on_person = false;
+        // Timed silence: "/ticho 30" mutes for 30 minutes, then auto-resumes.
+        // "/ticho" with no arg = permanent mute (persisted to config).
+        int minutes = args.toInt();
+        if (minutes > 0 && minutes <= 1440) {
+            // Remember originals so auto-resume can restore them.
+            silentSavedNotifyMotion = appConfig.telegram.notify_on_motion;
+            silentSavedNotifyFace   = appConfig.telegram.notify_on_face;
+            silentSavedNotifyPerson = appConfig.telegram.notify_on_person;
+            appConfig.telegram.notify_on_motion = false;
+            appConfig.telegram.notify_on_face   = false;
+            appConfig.telegram.notify_on_person = false;
+            silentUntilMs = millis() + (unsigned long)minutes * 60UL * 1000UL;
+            // Not saved to config — the silence is intentionally runtime-only
+            // so a crash/reboot cancels it rather than accidentally muting for hours.
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                "\xF0\x9F\x94\x95 Ticho na %d min, pak se notifikace samy obnoví.",
+                minutes);
+            sendTextSync(buf);
+        } else {
+            silentUntilMs = 0;
+            appConfig.telegram.notify_on_motion = false;
+            appConfig.telegram.notify_on_face   = false;
+            appConfig.telegram.notify_on_person = false;
+            appConfig.telegram.photo_on_motion  = false;
+            appConfig.telegram.photo_on_face    = false;
+            appConfig.telegram.photo_on_person  = false;
+            saveConfig();
+            sendTextSync("\xF0\x9F\x94\x95 Režim TICHO (trvalý). Zapnutí přes /hlidej.");
+        }
+    }
+    else if (cmd == "arm") {
+        // Alias for /hlidej — shorter, matches common alarm-system UX.
+        silentUntilMs = 0;
+        appConfig.telegram.notify_on_person = true;
+        appConfig.telegram.notify_on_motion = true;
+        appConfig.telegram.notify_on_face   = true;
+        appConfig.motion.enabled = true;
+        appConfig.person_detect.enabled = true;
+        appConfig.face_detect.enabled = true;
         saveConfig();
-        sendTextSync("Rezim TICHO aktivovan (notifikace VYP)");
+        sendTextSync("\xF0\x9F\x94\x94 ARMED — notifikace ZAP.");
+    }
+    else if (cmd == "disarm") {
+        silentUntilMs = 0;
+        appConfig.telegram.notify_on_person = false;
+        appConfig.telegram.notify_on_motion = false;
+        appConfig.telegram.notify_on_face   = false;
+        saveConfig();
+        sendTextSync("\xF0\x9F\x94\x95 DISARMED — notifikace VYP. Detektory běží dál.");
     }
     else if (cmd == "hodiny") {
         // Parse "HH-HH" format
@@ -304,10 +501,10 @@ static void handleCommand(const String& cmd, const String& args) {
             appConfig.telegram.active_end_hour = end;
             saveConfig();
             char buf[64];
-            snprintf(buf, sizeof(buf), "Aktivni hodiny: %d:00 - %d:00", start, end);
+            snprintf(buf, sizeof(buf), "Aktivní hodiny: %d:00 – %d:00", start, end);
             sendTextSync(buf);
         } else {
-            sendTextSync("Pouziti: /hodiny HH-HH (napr. /hodiny 22-7)");
+            sendTextSync("Použití: /hodiny HH-HH (např. /hodiny 22-7)");
         }
     }
     else if (cmd == "cooldown") {
@@ -316,10 +513,10 @@ static void handleCommand(const String& cmd, const String& args) {
             appConfig.telegram.cooldown_sec = val;
             saveConfig();
             char buf[64];
-            snprintf(buf, sizeof(buf), "Cooldown nastaven na %ds", val);
+            snprintf(buf, sizeof(buf), "Cooldown nastaven na %d s", val);
             sendTextSync(buf);
         } else {
-            sendTextSync("Pouziti: /cooldown N (5-3600 sekund)");
+            sendTextSync("Použití: /cooldown N (5–3600 sekund)");
         }
     }
     else if (cmd == "ip") {
@@ -338,30 +535,36 @@ static void handleCommand(const String& cmd, const String& args) {
         sendTextSync(buf);
     }
     else if (cmd == "restart" || cmd == "reboot") {
-        sendTextSync("Restartuji...");
+        sendTextSync("Restartuji…");
         vTaskDelay(pdMS_TO_TICKS(1000));
         ESP.restart();
     }
     else if (cmd == "help" || cmd == "napoveda" || cmd == "start") {
         sendTextSync(
             "<b>CamS3 Telegram Bot</b>\n\n"
-            "/foto - Poslat snapshot\n"
-            "/status - Info o systemu\n"
-            "/detekce - Prepnout notifikace pohybu\n"
-            "/obliceje - Prepnout notifikace obliceju\n"
-            "/osoba - Prepnout notifikace osob (FOMO)\n"
-            "/prah N - Prah pohybu (5-50)\n"
-            "/hlidej - Vse ZAP (24/7)\n"
-            "/ticho - Vse VYP\n"
-            "/hodiny HH-HH - Aktivni hodiny\n"
-            "/cooldown N - Cooldown (5-3600s)\n"
-            "/ip - IP a URL adresy\n"
-            "/restart - Restartovat zarizeni\n"
-            "/help - Tato napoveda"
+            "<b>Rychlé</b>\n"
+            "/foto – poslat snímek\n"
+            "/status – informace o systému\n"
+            "/arm – zapnout hlídání\n"
+            "/disarm – vypnout hlídání\n"
+            "/ticho N – ticho na N minut (pak auto-obnova)\n\n"
+            "<b>Detekce</b>\n"
+            "/detekce – přepnout pohyb\n"
+            "/obliceje – přepnout obličeje\n"
+            "/osoba – přepnout osoby (FOMO)\n"
+            "/prah N – práh pohybu (5–80)\n\n"
+            "<b>Režim</b>\n"
+            "/hlidej – vše ZAP (24/7, s fotkou)\n"
+            "/hodiny HH-HH – aktivní hodiny\n"
+            "/cooldown N – cooldown (5–3600 s)\n\n"
+            "<b>Systém</b>\n"
+            "/ip – IP a URL adresy\n"
+            "/restart – restartovat zařízení\n"
+            "/help – tato nápověda"
         );
     }
     else {
-        sendTextSync("Neznamy prikaz. Pouzij /help");
+        sendTextSync("Neznámý příkaz. Použij /help");
     }
 }
 
@@ -412,7 +615,7 @@ static void checkTelegramUpdates() {
         int64_t fromChatId = msg["chat"]["id"].as<int64_t>();
         int64_t ourChatId = atoll(appConfig.telegram.chat_id.c_str());
         if (fromChatId != ourChatId) {
-            Serial.printf("[%s] Unauthorized chat_id: %lld\n", TAG, (long long)fromChatId);
+            logCapture("[%s] Unauthorized chat_id: %lld\n", TAG, (long long)fromChatId);
             continue;
         }
 
@@ -451,13 +654,27 @@ static void checkTelegramUpdates() {
 void telegramInit() {
     tgQueue = xQueueCreate(TELEGRAM_QUEUE_SIZE, sizeof(TelegramMessage));
     if (!tgQueue) {
-        Serial.printf("[%s] Queue creation failed!\n", TAG);
+        logCapture("[%s] Queue creation failed!\n", TAG);
     }
-    Serial.printf("[%s] Initialized (queue=%d)\n", TAG, TELEGRAM_QUEUE_SIZE);
+    logCapture("[%s] Initialized (queue=%d)\n", TAG, TELEGRAM_QUEUE_SIZE);
+}
+
+// Cooldown applies to notifications (photos + texts triggered by events).
+// Command-response sends should bypass the cooldown — internal helpers go through
+// the queue unconditionally, the public API enforces the limit.
+static bool cooldownElapsed() {
+    unsigned long cd = (unsigned long)appConfig.telegram.cooldown_sec * 1000UL;
+    if (cd == 0) return true;
+    return (millis() - lastTgSendTime) >= cd;
 }
 
 void telegramSendText(const char* msg) {
     if (!tgQueue || !msg) return;
+
+    if (!cooldownElapsed()) {
+        logCapture("[%s] Cooldown active, text dropped\n", TAG);
+        return;
+    }
 
     TelegramMessage tgMsg = {};
     strncpy(tgMsg.text, msg, TELEGRAM_MSG_MAX_LEN - 1);
@@ -466,17 +683,22 @@ void telegramSendText(const char* msg) {
     tgMsg.photo_len = 0;
 
     if (xQueueSend(tgQueue, &tgMsg, 0) != pdTRUE) {
-        Serial.printf("[%s] Queue full, text dropped\n", TAG);
+        logCapture("[%s] Queue full, text dropped\n", TAG);
     }
 }
 
 void telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption) {
     if (!tgQueue || !jpeg || len == 0) return;
 
+    if (!cooldownElapsed()) {
+        logCapture("[%s] Cooldown active, photo dropped\n", TAG);
+        return;
+    }
+
     // Copy JPEG to PSRAM (freed by task after send)
     uint8_t* copy = (uint8_t*)ps_malloc(len);
     if (!copy) {
-        Serial.printf("[%s] PSRAM alloc failed for photo (%u bytes)\n", TAG, len);
+        logCapture("[%s] PSRAM alloc failed for photo (%u bytes)\n", TAG, len);
         return;
     }
     memcpy(copy, jpeg, len);
@@ -488,44 +710,166 @@ void telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption) {
     tgMsg.photo_len = len;
 
     if (xQueueSend(tgQueue, &tgMsg, 0) != pdTRUE) {
-        Serial.printf("[%s] Queue full, photo dropped\n", TAG);
+        logCapture("[%s] Queue full, spilling photo to SD\n", TAG);
+#ifdef INCLUDE_SD_CARD
+        persistPhotoToSd(copy, len, caption);
+#endif
         free(copy);
     }
 }
 
+// Rich boot notification sent once Telegram API is reachable. Includes
+// system state the user actually cares about when the device reconnects.
+static void sendBootMessage() {
+    char buf[768];
+    snprintf(buf, sizeof(buf),
+        "\xF0\x9F\x9A\x80 <b>CamS3 online</b>\n"
+        "━━━━━━━━━━━━━\n"
+        "IP: <code>%s</code>\n"
+        "Host: %s\n"
+        "FW: %s\n"
+        "Heap: %d kB free / %d kB min\n"
+        "PSRAM: %d MB free\n"
+        "WiFi: %d dBm\n"
+        "━━━━━━━━━━━━━\n"
+        "Pohyb: %s\n"
+        "Obličeje: %s\n"
+        "Osoby (FOMO): %s\n"
+        "MQTT: %s\n"
+        "━━━━━━━━━━━━━\n"
+        "/help – příkazy  |  /foto – snímek",
+        getIPAddress().c_str(),
+        appConfig.wifi.hostname.c_str(),
+        FIRMWARE_VERSION,
+        (int)(ESP.getFreeHeap() / 1024),
+        (int)(ESP.getMinFreeHeap() / 1024),
+        (int)(ESP.getFreePsram() / (1024 * 1024)),
+        getRSSI(),
+        appConfig.motion.enabled ? "ZAP" : "VYP",
+        appConfig.face_detect.enabled ? "ZAP" : "VYP",
+        appConfig.person_detect.enabled ? "ZAP" : "VYP",
+#ifdef INCLUDE_MQTT
+        isMqttConnected() ? "connected" : (appConfig.mqtt.enabled ? "connecting" : "VYP")
+#else
+        "N/A"
+#endif
+    );
+    sendTextSync(buf);
+}
+
+// Register the slash-command menu so Telegram shows the "Menu" button
+// with clickable commands. Called once per boot; Telegram stores them.
+static void registerBotCommands() {
+    if (!isTelegramConnected() || !isWiFiConnected()) return;
+
+    String url = "https://api.telegram.org/bot" + appConfig.telegram.bot_token + "/setMyCommands";
+
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    if (!http.begin(client, url)) return;
+    http.setTimeout(8000);
+    http.addHeader("Content-Type", "application/json");
+
+    // Keep short — Telegram shows max ~8 comfortably in the slide-up menu.
+    static const char* body =
+        "{\"commands\":["
+        "{\"command\":\"foto\",\"description\":\"Snímek z kamery\"},"
+        "{\"command\":\"status\",\"description\":\"Stav a metriky\"},"
+        "{\"command\":\"arm\",\"description\":\"Zapnout hlídání\"},"
+        "{\"command\":\"disarm\",\"description\":\"Vypnout hlídání\"},"
+        "{\"command\":\"ticho\",\"description\":\"Ticho N minut (pak auto-obnova)\"},"
+        "{\"command\":\"osoba\",\"description\":\"Přepnout notifikace osob\"},"
+        "{\"command\":\"ip\",\"description\":\"IP a URL adresy\"},"
+        "{\"command\":\"help\",\"description\":\"Seznam všech příkazů\"}"
+        "]}";
+
+    int code = http.POST(body);
+    http.end();
+    logCapture("[%s] setMyCommands: HTTP %d\n", TAG, code);
+}
+
+// Auto-resume from timed silence. Returns true if we just resumed
+// (caller sends a heads-up message), false otherwise.
+static bool maybeResumeFromSilence() {
+    if (silentUntilMs == 0) return false;
+    if ((long)(millis() - silentUntilMs) < 0) return false;
+    appConfig.telegram.notify_on_motion = silentSavedNotifyMotion;
+    appConfig.telegram.notify_on_face   = silentSavedNotifyFace;
+    appConfig.telegram.notify_on_person = silentSavedNotifyPerson;
+    silentUntilMs = 0;
+    return true;
+}
+
 void telegramTask(void* param) {
-    Serial.printf("[%s] Telegram task started\n", TAG);
+    logCapture("[%s] Telegram task started\n", TAG);
+    esp_task_wdt_add(NULL);
 
     // Wait for WiFi before doing anything
     while (!isWiFiConnected()) {
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    // Clear any pending updates from before boot
-    if (isTelegramConnected()) {
+    // Give DNS/TLS a moment to warm up on the first connect.
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    bool bootAnnounced = false;
+    bool commandsRegistered = false;
+
+    // Clear any pending updates from before boot (so a /foto queued
+    // while the device was offline doesn't fire as a stale command).
+    if (isTelegramConnected() && appConfig.telegram.enabled) {
         checkTelegramUpdates();
-        Serial.printf("[%s] Cleared pending updates\n", TAG);
+        logCapture("[%s] Cleared pending updates\n", TAG);
     }
 
     while (true) {
+        esp_task_wdt_reset();
         if (!appConfig.telegram.enabled || !isTelegramConnected()) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
 
+        // First successful cycle after becoming enabled: register menu + boot msg.
+        if (!commandsRegistered) {
+            registerBotCommands();
+            commandsRegistered = true;
+        }
+        if (!bootAnnounced) {
+            sendBootMessage();
+            bootAnnounced = true;
+        }
+
+        // Silence timer — auto-resume notifications if the timed mute expired.
+        if (maybeResumeFromSilence()) {
+            sendTextSync("\xF0\x9F\x94\x94 Ticho skončilo, notifikace obnoveny.");
+        }
+
         TelegramMessage msg;
         if (xQueueReceive(tgQueue, &msg, pdMS_TO_TICKS(appConfig.telegram.poll_interval_ms)) == pdTRUE) {
-            // Cooldown check for notifications (not for command responses)
+            bool sent = true;
             if (msg.has_photo) {
-                sendPhotoSync(msg.photo_data, msg.photo_len, msg.text);
+                sent = sendPhotoSync(msg.photo_data, msg.photo_len, msg.text);
+                // On network failure, spill to SD so the photo isn't lost.
+                // (Corrupt JPEG → 400 from Telegram → sent=false but spilling
+                //  would just loop; accept that as the trade-off.)
+#ifdef INCLUDE_SD_CARD
+                if (!sent) {
+                    persistPhotoToSd(msg.photo_data, msg.photo_len, msg.text);
+                }
+#endif
                 free(msg.photo_data);
             } else if (msg.text[0]) {
                 sendTextSync(msg.text);
             }
             lastTgSendTime = millis();
         } else {
-            // Queue timeout - poll for incoming commands
+            // Queue timeout — poll for incoming commands, then drain one pending photo.
             checkTelegramUpdates();
+#ifdef INCLUDE_SD_CARD
+            flushOnePendingFromSd();
+#endif
         }
     }
 }

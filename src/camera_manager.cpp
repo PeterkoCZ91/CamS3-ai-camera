@@ -1,9 +1,11 @@
 #include "camera_manager.h"
+#include "ws_log.h"
 #include "config.h"
 #include "board_config.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <esp_task_wdt.h>
 
 static const char* TAG = "CameraMgr";
 
@@ -13,13 +15,57 @@ static const char* TAG = "CameraMgr";
 struct FrameSlot {
     uint8_t* data;
     size_t   len;
+    uint16_t width;          // sensor dimensions of THIS frame, not of the
+    uint16_t height;         // current config — decoders size buffers from these
+    uint32_t timestamp_ms;
     volatile int ref_count;  // -1 = writing, 0 = free, >0 = readers
 };
 
 static FrameSlot ringBuffer[RING_BUF_SLOTS];
 static volatile int writeIndex = 0;
 static volatile int latestIndex = -1;
-static SemaphoreHandle_t ringMutex = NULL;
+static volatile uint32_t ringDroppedFrames = 0;
+
+// ref_count protocol (all accesses through __atomic_*):
+//   -1 = writer owns the slot   0 = free   >0 = number of active readers
+// Claim a slot for writing. Fails if anyone is reading it or a writer already has it.
+static inline bool ringSlotAcquireWrite(int idx) {
+    int expected = 0;
+    return __atomic_compare_exchange_n(&ringBuffer[idx].ref_count, &expected, -1,
+                                       false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+// Take a read reference. Bounded retry: the CAS can lose a race against another
+// reader, but the writer only holds a slot for the duration of one memcpy, so a
+// handful of yields is always enough. Returns false if the writer owns the slot.
+static inline bool ringSlotAcquireRead(int idx) {
+    for (int attempt = 0; attempt < 16; attempt++) {
+        int expected = __atomic_load_n(&ringBuffer[idx].ref_count, __ATOMIC_SEQ_CST);
+        if (expected < 0) return false;
+        if (__atomic_compare_exchange_n(&ringBuffer[idx].ref_count, &expected, expected + 1,
+                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            return true;
+        }
+        taskYIELD();
+    }
+    return false;
+}
+
+// Drop a read reference, refusing to go below zero if a handle is released twice.
+static inline void ringSlotReleaseRead(int idx) {
+    for (;;) {
+        int expected = __atomic_load_n(&ringBuffer[idx].ref_count, __ATOMIC_SEQ_CST);
+        if (expected <= 0) return;
+        if (__atomic_compare_exchange_n(&ringBuffer[idx].ref_count, &expected, expected - 1,
+                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            return;
+        }
+    }
+}
+// tjpgd (the JPEG decoder behind jpg2rgb565 / fmt2rgb888) keeps decode
+// state in static globals — concurrent calls from different tasks corrupt
+// each other. Serialize all JPEG decodes through this mutex.
+static SemaphoreHandle_t decodeMutex = NULL;
 
 // Stats
 static volatile uint32_t captureCount = 0;
@@ -31,31 +77,63 @@ static uint32_t fpsFrameCount = 0;
 
 // Stream client tracking
 static volatile int streamClients = 0;
+static volatile int detectionStreamClients = 0;
 static SemaphoreHandle_t clientMutex = NULL;
 
 // Capture task handle
 static TaskHandle_t captureTaskHandle = NULL;
 static volatile bool captureRunning = false;
+// Set by the capture task itself right before it deletes itself, so teardown can
+// tell "asked to stop" apart from "actually gone". Tearing the camera driver down
+// while the task is still inside esp_camera_fb_get() corrupts the DMA state.
+static volatile bool captureTaskExited = true;
+
+// Reinit request flag (set by capture task, handled by main loop / healthWatchdog)
+static volatile bool reinitRequested = false;
+// Deferred sensor-settings apply, consumed by the capture task between frames.
+static volatile bool settingsApplyRequested = false;
 
 // Max JPEG buffer size per slot (256KB should cover up to UXGA JPEG)
 #define MAX_FRAME_SIZE (256 * 1024)
 
+// Allocate the ring buffer once per boot and keep it for the process lifetime.
+// The slots are plain PSRAM buffers with no camera-driver dependency, so a camera
+// reinit does not need to (and must not) free them: readers hand out raw pointers
+// into these slots, and freeing underneath a streaming client was a use-after-free.
+// Keeping them also avoids re-fragmenting PSRAM with 3x256 kB churn on every reinit.
 static bool initRingBuffer() {
-    ringMutex = xSemaphoreCreateMutex();
-    clientMutex = xSemaphoreCreateMutex();
-
-    for (int i = 0; i < RING_BUF_SLOTS; i++) {
-        ringBuffer[i].data = (uint8_t*)ps_malloc(MAX_FRAME_SIZE);
-        if (!ringBuffer[i].data) {
-            Serial.printf("[%s] Failed to allocate ring buffer slot %d\n", TAG, i);
-            return false;
-        }
-        ringBuffer[i].len = 0;
-        ringBuffer[i].ref_count = 0;
+    if (!clientMutex) clientMutex = xSemaphoreCreateMutex();
+    if (!decodeMutex) decodeMutex = xSemaphoreCreateMutex();
+    if (!clientMutex || !decodeMutex) {
+        logCapture("[%s] Failed to create mutexes\n", TAG);
+        return false;
     }
 
-    Serial.printf("[%s] Ring buffer: %d slots x %dKB in PSRAM\n",
-                  TAG, RING_BUF_SLOTS, MAX_FRAME_SIZE / 1024);
+    bool firstInit = (ringBuffer[0].data == NULL);
+
+    for (int i = 0; i < RING_BUF_SLOTS; i++) {
+        if (!ringBuffer[i].data) {
+            ringBuffer[i].data = (uint8_t*)ps_malloc(MAX_FRAME_SIZE);
+            if (!ringBuffer[i].data) {
+                logCapture("[%s] Failed to allocate ring buffer slot %d\n", TAG, i);
+                return false;
+            }
+            ringBuffer[i].ref_count = 0;
+        }
+        // Drop stale frame metadata; leave ref_count alone so readers that are
+        // mid-transfer across a reinit can still release their handles.
+        ringBuffer[i].len = 0;
+        ringBuffer[i].width = 0;
+        ringBuffer[i].height = 0;
+        ringBuffer[i].timestamp_ms = 0;
+    }
+    writeIndex = 0;
+    latestIndex = -1;
+
+    if (firstInit) {
+        logCapture("[%s] Ring buffer: %d slots x %dKB in PSRAM\n",
+                      TAG, RING_BUF_SLOTS, MAX_FRAME_SIZE / 1024);
+    }
     return true;
 }
 
@@ -91,25 +169,25 @@ bool cameraInit() {
         config.jpeg_quality = appConfig.camera.jpeg_quality;
         config.fb_count     = FB_COUNT;
         config.fb_location  = CAMERA_FB_IN_PSRAM;
-        Serial.printf("[%s] PSRAM found: %dKB free\n", TAG, ESP.getFreePsram() / 1024);
+        logCapture("[%s] PSRAM found: %dKB free\n", TAG, ESP.getFreePsram() / 1024);
     } else {
         config.frame_size   = FRAMESIZE_SVGA;
         config.jpeg_quality = 16;
         config.fb_count     = 1;
         config.fb_location  = CAMERA_FB_IN_DRAM;
-        Serial.printf("[%s] WARNING: No PSRAM, using limited config\n", TAG);
+        logCapture("[%s] WARNING: No PSRAM, using limited config\n", TAG);
     }
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("[%s] Camera init failed: 0x%x\n", TAG, err);
+        logCapture("[%s] Camera init failed: 0x%x\n", TAG, err);
         return false;
     }
 
     // Detect sensor
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
-        Serial.printf("[%s] Sensor PID: 0x%04X\n", TAG, s->id.PID);
+        logCapture("[%s] Sensor PID: 0x%04X\n", TAG, s->id.PID);
     }
 
     // Apply saved settings
@@ -117,31 +195,38 @@ bool cameraInit() {
 
     // Initialize ring buffer
     if (!initRingBuffer()) {
-        Serial.printf("[%s] Ring buffer init failed\n", TAG);
+        logCapture("[%s] Ring buffer init failed\n", TAG);
         return false;
     }
 
-    Serial.printf("[%s] Camera initialized OK\n", TAG);
+    logCapture("[%s] Camera initialized OK\n", TAG);
     return true;
 }
 
-void cameraDeinit() {
-    stopCaptureTask();
-    esp_camera_deinit();
-
-    for (int i = 0; i < RING_BUF_SLOTS; i++) {
-        if (ringBuffer[i].data) {
-            free(ringBuffer[i].data);
-            ringBuffer[i].data = NULL;
-        }
+bool cameraDeinit() {
+    if (!stopCaptureTask()) {
+        // The task is wedged somewhere in the driver. Deinitializing now would
+        // pull the frame buffers out from under it; leave the camera as-is and let
+        // the caller decide (healthWatchdog escalates to a reboot after retries).
+        logCapture("[%s] Capture task did not stop — skipping deinit\n", TAG);
+        return false;
     }
-    Serial.printf("[%s] Camera deinitialized\n", TAG);
+
+    // Invalidate published frames so no consumer picks up a stale slot across the
+    // reinit. Buffers themselves stay allocated (see initRingBuffer). Readers that
+    // already hold a handle keep working from their own copy of buf/len.
+    __atomic_store_n(&latestIndex, -1, __ATOMIC_SEQ_CST);
+    for (int i = 0; i < RING_BUF_SLOTS; i++) ringBuffer[i].len = 0;
+
+    esp_camera_deinit();
+    logCapture("[%s] Camera deinitialized\n", TAG);
+    return true;
 }
 
 bool cameraReinit() {
-    Serial.printf("[%s] Reinitializing camera...\n", TAG);
+    logCapture("[%s] Reinitializing camera...\n", TAG);
     bool wasRunning = captureRunning;
-    cameraDeinit();
+    if (!cameraDeinit()) return false;
     delay(500);
 
     bool ok = cameraInit();
@@ -168,13 +253,16 @@ void releaseFrame(camera_fb_t* fb) {
 
 // Capture task: continuously captures frames into ring buffer
 static void captureTask(void* param) {
-    Serial.printf("[%s] Capture task started on core %d\n", TAG, xPortGetCoreID());
+    logCapture("[%s] Capture task started on core %d\n", TAG, xPortGetCoreID());
+    captureTaskExited = false;
     fpsCountStart = millis();
     fpsFrameCount = 0;
+    esp_task_wdt_add(NULL);
 
     while (captureRunning) {
+        esp_task_wdt_reset();
         // Adaptive frame rate based on connected clients
-        int clients = getStreamClientCount();
+        int clients = getTotalStreamClientCount();
         int targetDelay;
         if (clients > 0) {
             targetDelay = 1000 / max(1, appConfig.active_fps);
@@ -182,49 +270,78 @@ static void captureTask(void* param) {
             targetDelay = 1000 / max(1, appConfig.idle_fps);
         }
 
+        uint32_t loopStart = millis();
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
             captureErrors++;
-            Serial.printf("[%s] Capture failed (errors: %lu)\n", TAG, captureErrors);
+            logCapture("[%s] Capture failed (errors: %lu)\n", TAG, captureErrors);
             vTaskDelay(pdMS_TO_TICKS(100));
 
-            // Auto-reinit after 10 consecutive errors
+            // Ask main loop to reinit (it will stop this task first)
             if (captureErrors > 0 && (captureErrors % 10) == 0) {
-                Serial.printf("[%s] Too many errors, attempting reinit\n", TAG);
-                esp_camera_deinit();
-                delay(1000);
-                // Re-init will be done in main loop watchdog
+                logCapture("[%s] Too many errors, requesting reinit\n", TAG);
+                reinitRequested = true;
             }
             continue;
         }
 
-        // Copy frame to ring buffer
-        if (fb->len <= MAX_FRAME_SIZE && xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
-            // Find a free slot (not being read)
+        // Publish the frame into the ring buffer. Lock-free: the writer claims a
+        // slot with a CAS 0 -> -1 and copies into it without holding any mutex.
+        // The previous version held ringMutex across the whole memcpy (up to 256 kB,
+        // ~2 ms), and every reader — two MJPEG streams plus three detection tasks —
+        // had to queue behind it just to look up the latest frame.
+        if (fb->len > MAX_FRAME_SIZE) {
+            // Oversized frame: nothing can consume it, but dropping it without a
+            // trace made it look like the camera had simply gone quiet.
+            ringDroppedFrames++;
+            if ((ringDroppedFrames % 50) == 1) {
+                logCapture("[%s] Frame %u B exceeds slot size %u B, dropped (total %lu)\n",
+                           TAG, (unsigned)fb->len, (unsigned)MAX_FRAME_SIZE,
+                           (unsigned long)ringDroppedFrames);
+            }
+        } else {
             int slot = -1;
             for (int i = 0; i < RING_BUF_SLOTS; i++) {
                 int idx = (writeIndex + i) % RING_BUF_SLOTS;
-                if (ringBuffer[idx].ref_count == 0) {
-                    slot = idx;
-                    break;
-                }
+                if (ringSlotAcquireWrite(idx)) { slot = idx; break; }
             }
 
             if (slot >= 0) {
-                ringBuffer[slot].ref_count = -1;  // Mark as writing
+                uint32_t capturedAt = millis();
                 memcpy(ringBuffer[slot].data, fb->buf, fb->len);
                 ringBuffer[slot].len = fb->len;
-                ringBuffer[slot].ref_count = 0;
-                latestIndex = slot;
-                writeIndex = (slot + 1) % RING_BUF_SLOTS;
-            }
+                ringBuffer[slot].width = fb->width;
+                ringBuffer[slot].height = fb->height;
+                ringBuffer[slot].timestamp_ms = capturedAt;
 
-            xSemaphoreGive(ringMutex);
+                // Release the slot BEFORE publishing the index: a reader that sees
+                // the new latestIndex must find ref_count >= 0, never -1.
+                __atomic_store_n(&ringBuffer[slot].ref_count, 0, __ATOMIC_SEQ_CST);
+                __atomic_store_n(&latestIndex, slot, __ATOMIC_SEQ_CST);
+                writeIndex = (slot + 1) % RING_BUF_SLOTS;
+            } else {
+                // All slots held by readers. Dropping the frame is correct, but it
+                // used to happen silently — a stalled consumer looked like low FPS.
+                ringDroppedFrames++;
+                if ((ringDroppedFrames % 50) == 1) {
+                    logCapture("[%s] Ring buffer full, frame dropped (total %lu)\n",
+                               TAG, (unsigned long)ringDroppedFrames);
+                }
+            }
         }
 
         esp_camera_fb_return(fb);
         captureCount++;
         lastCaptureMs = millis();
+
+        // SCCB is idle right here — the only point in the loop where writing sensor
+        // registers cannot collide with an in-flight frame grab. Frame size is
+        // deliberately excluded: it needs the DMA buffers rebuilt, which is what the
+        // reinit request path does.
+        if (settingsApplyRequested) {
+            settingsApplyRequested = false;
+            applyConfigToCamera(false);
+        }
 
         // FPS calculation (every 2 seconds)
         fpsFrameCount++;
@@ -235,8 +352,11 @@ static void captureTask(void* param) {
             fpsCountStart = millis();
         }
 
-        // Frame rate limiting
-        int captureTime = millis() - lastCaptureMs;
+        // Frame rate limiting. Measure from the top of the iteration — subtracting
+        // lastCaptureMs (just set to millis()) always yielded 0, so every frame paid
+        // the full targetDelay on top of its capture time and the real rate came out
+        // well under the configured FPS.
+        int captureTime = (int)(millis() - loopStart);
         int waitTime = targetDelay - captureTime;
         if (waitTime > 0) {
             vTaskDelay(pdMS_TO_TICKS(waitTime));
@@ -245,57 +365,99 @@ static void captureTask(void* param) {
         }
     }
 
-    Serial.printf("[%s] Capture task stopped\n", TAG);
+    logCapture("[%s] Capture task stopped\n", TAG);
+    esp_task_wdt_delete(NULL);
+    captureTaskExited = true;
     vTaskDelete(NULL);
 }
 
 void startCaptureTask() {
     if (captureRunning) return;
     captureRunning = true;
-    xTaskCreatePinnedToCore(captureTask, "capture", CAPTURE_TASK_STACK,
-                            NULL, CAPTURE_TASK_PRIO, &captureTaskHandle, 1);
-}
-
-void stopCaptureTask() {
-    captureRunning = false;
-    if (captureTaskHandle) {
-        vTaskDelay(pdMS_TO_TICKS(200));
+    captureTaskExited = false;
+    if (xTaskCreatePinnedToCore(captureTask, "capture", CAPTURE_TASK_STACK,
+                                NULL, CAPTURE_TASK_PRIO, &captureTaskHandle, 1) != pdPASS) {
+        captureRunning = false;
+        captureTaskExited = true;
         captureTaskHandle = NULL;
+        logCapture("[%s] Failed to create capture task\n", TAG);
     }
 }
 
-bool ringBufferGetLatest(const uint8_t** buf, size_t* len) {
-    if (latestIndex < 0) return false;
+// Returns true once the capture task has really left its loop and deleted itself.
+// The old version only waited a flat 200 ms, which is shorter than a single
+// esp_camera_fb_get() at UXGA — so a reinit could pull the driver out from under a
+// task that was still mid-DMA.
+bool stopCaptureTask() {
+    captureRunning = false;
+    if (!captureTaskHandle) return true;
 
-    if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
-        int idx = latestIndex;
-        if (idx >= 0 && ringBuffer[idx].ref_count >= 0 && ringBuffer[idx].len > 0) {
-            ringBuffer[idx].ref_count++;
-            *buf = ringBuffer[idx].data;
-            *len = ringBuffer[idx].len;
-            xSemaphoreGive(ringMutex);
-            return true;
-        }
-        xSemaphoreGive(ringMutex);
+    const int WAIT_STEP_MS = 20;
+    const int WAIT_MAX_MS  = 3000;
+    for (int waited = 0; waited < WAIT_MAX_MS && !captureTaskExited; waited += WAIT_STEP_MS) {
+        delay(WAIT_STEP_MS);
     }
-    return false;
+
+    if (!captureTaskExited) {
+        logCapture("[%s] Capture task still running after %dms\n", TAG, WAIT_MAX_MS);
+        return false;
+    }
+    captureTaskHandle = NULL;
+    return true;
 }
 
-void ringBufferRelease() {
-    if (xSemaphoreTake(ringMutex, pdMS_TO_TICKS(50))) {
-        for (int i = 0; i < RING_BUF_SLOTS; i++) {
-            if (ringBuffer[i].ref_count > 0) {
-                ringBuffer[i].ref_count--;
-            }
-        }
-        xSemaphoreGive(ringMutex);
+int ringBufferGetLatest(const uint8_t** buf, size_t* len,
+                        uint16_t* width, uint16_t* height) {
+    int idx = __atomic_load_n(&latestIndex, __ATOMIC_SEQ_CST);
+    if (idx < 0 || idx >= RING_BUF_SLOTS) return -1;
+
+    // Holding a read reference is what makes the slot's contents stable: the writer
+    // can only claim slots whose ref_count is exactly 0.
+    if (!ringSlotAcquireRead(idx)) return -1;
+
+    if (ringBuffer[idx].len == 0) {
+        ringSlotReleaseRead(idx);
+        return -1;
     }
+
+    *buf = ringBuffer[idx].data;
+    *len = ringBuffer[idx].len;
+    if (width)  *width  = ringBuffer[idx].width;
+    if (height) *height = ringBuffer[idx].height;
+    return idx;
+}
+
+uint32_t ringBufferGetTimestamp(int handle) {
+    if (handle < 0 || handle >= RING_BUF_SLOTS) return 0;
+    // Caller holds a read reference for this handle, so the field cannot change.
+    return ringBuffer[handle].timestamp_ms;
+}
+
+void ringBufferRelease(int handle) {
+    if (handle < 0 || handle >= RING_BUF_SLOTS) return;
+    ringSlotReleaseRead(handle);
+}
+
+uint32_t getRingDroppedFrames() { return ringDroppedFrames; }
+
+void cameraRequestReinit() { reinitRequested = true; }
+bool cameraReinitRequested() { return reinitRequested; }
+void cameraClearReinitRequest() { reinitRequested = false; }
+void cameraRequestSettingsApply() { settingsApplyRequested = true; }
+
+bool cameraDecodeLock(TickType_t timeout) {
+    if (!decodeMutex) return true;  // not initialized yet → best-effort
+    return xSemaphoreTake(decodeMutex, timeout) == pdTRUE;
+}
+
+void cameraDecodeUnlock() {
+    if (decodeMutex) xSemaphoreGive(decodeMutex);
 }
 
 void streamClientConnected() {
     if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
         streamClients++;
-        Serial.printf("[%s] Stream client connected (total: %d)\n", TAG, streamClients);
+        logCapture("[%s] Stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
         xSemaphoreGive(clientMutex);
     }
 }
@@ -303,12 +465,30 @@ void streamClientConnected() {
 void streamClientDisconnected() {
     if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
         if (streamClients > 0) streamClients--;
-        Serial.printf("[%s] Stream client disconnected (total: %d)\n", TAG, streamClients);
+        logCapture("[%s] Stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
+        xSemaphoreGive(clientMutex);
+    }
+}
+
+void detectionStreamClientConnected() {
+    if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
+        detectionStreamClients++;
+        logCapture("[%s] Detection stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
+        xSemaphoreGive(clientMutex);
+    }
+}
+
+void detectionStreamClientDisconnected() {
+    if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
+        if (detectionStreamClients > 0) detectionStreamClients--;
+        logCapture("[%s] Detection stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
         xSemaphoreGive(clientMutex);
     }
 }
 
 int getStreamClientCount()  { return streamClients; }
+int getDetectionStreamClientCount() { return detectionStreamClients; }
+int getTotalStreamClientCount() { return streamClients + detectionStreamClients; }
 uint32_t getCaptureCount()  { return captureCount; }
 float getCaptureFps()       { return captureFps; }
 uint32_t getLastCaptureMs() { return lastCaptureMs; }

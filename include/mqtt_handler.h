@@ -12,6 +12,7 @@ void mqttTask(void* param);
 // Publish state updates
 void mqttPublishMotion(bool detected);
 void mqttPublishPerson(bool detected, int count);
+void mqttPublishPersonUncertain(float confidence, int tracks);
 void mqttPublishFace(bool detected, int count);
 void mqttPublishStatus();
 

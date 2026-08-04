@@ -1,4 +1,6 @@
 #include "tracker.h"
+#include "ws_log.h"
+#include "config.h"
 #include <string.h>
 #include <math.h>
 
@@ -10,7 +12,7 @@ static int nextTrackId = 1;
 
 void trackerInit() {
     trackerReset();
-    Serial.printf("[%s] Tracker initialized (max %d tracks)\n", TAG, TRACKER_MAX_TRACKS);
+    logCapture("[%s] Tracker initialized (max %d tracks)\n", TAG, TRACKER_MAX_TRACKS);
 }
 
 void trackerReset() {
@@ -46,7 +48,10 @@ int trackerUpdate(const Detection* detections, int numDetections) {
     }
 
     unsigned long now = millis();
-    int maxDistSq = TRACKER_MATCH_DIST * TRACKER_MATCH_DIST;
+    int matchDist   = appConfig.tracker.match_dist   > 0 ? appConfig.tracker.match_dist   : TRACKER_MATCH_DIST_DEFAULT;
+    int confirmHits = appConfig.tracker.confirm_hits > 0 ? appConfig.tracker.confirm_hits : TRACKER_CONFIRM_HITS_DEFAULT;
+    int maxMisses   = appConfig.tracker.max_misses   > 0 ? appConfig.tracker.max_misses   : TRACKER_MAX_MISSES_DEFAULT;
+    int maxDistSq = matchDist * matchDist;
 
     // --- Greedy nearest-neighbor matching ---
     bool trackMatched[TRACKER_MAX_TRACKS] = {};
@@ -90,7 +95,7 @@ int trackerUpdate(const Detection* detections, int numDetections) {
         tr.lastSeen = now;
 
         // State transitions
-        if (tr.state == TRACK_TENTATIVE && tr.hits >= TRACKER_CONFIRM_HITS) {
+        if (tr.state == TRACK_TENTATIVE && tr.hits >= confirmHits) {
             tr.state = TRACK_CONFIRMED;
         } else if (tr.state == TRACK_LOST) {
             tr.state = TRACK_CONFIRMED;
@@ -107,7 +112,7 @@ int trackerUpdate(const Detection* detections, int numDetections) {
         tr.misses++;
         tr.hits = 0;
 
-        if (tr.misses >= TRACKER_MAX_MISSES) {
+        if (tr.misses >= maxMisses) {
             tr.state = TRACK_DELETED;
         } else if (tr.state == TRACK_CONFIRMED) {
             tr.state = TRACK_LOST;

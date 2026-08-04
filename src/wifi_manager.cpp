@@ -1,10 +1,15 @@
 #include "wifi_manager.h"
+#include "ws_log.h"
 #include "config.h"
 #include <WiFi.h>
 #include <DNSServer.h>
 
 #ifdef INCLUDE_MDNS
 #include <ESPmDNS.h>
+#endif
+
+#ifdef INCLUDE_EVENT_LOG
+#include "event_log.h"
 #endif
 
 static const char* TAG = "WiFiMgr";
@@ -14,12 +19,49 @@ static AppWiFiMode currentMode = APP_WIFI_NONE;
 static unsigned long lastReconnectAttempt = 0;
 static const unsigned long RECONNECT_INTERVAL = 30000;  // 30s between reconnect attempts
 
+// Silent-death watchdog. WiFi.status() can stick at WL_CONNECTED after the
+// link is actually dead (common on ESP32 when the AP vanishes without a
+// disconnect notification). Track last time we observed signs of life
+// (non-zero IP + non-zero RSSI) and force a reconnect if stuck too long.
+static unsigned long lastGoodWiFiMs = 0;
+static const unsigned long WIFI_STALE_TIMEOUT_MS = 90000;  // 90s -> forced reconnect
+
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+    switch (event) {
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            logCapture("[%s] Got IP: %s (RSSI %d)\n", TAG,
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            lastGoodWiFiMs = millis();
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            // Underlying reason in info.wifi_sta_disconnected.reason
+            logCapture("[%s] Disconnected (reason %d), auto-reconnecting\n",
+                          TAG, info.wifi_sta_disconnected.reason);
+            // setAutoReconnect + WiFi.reconnect() covers most cases; the
+            // watchdog in wifiLoop() catches the ones where the event never fires.
+            break;
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            logCapture("[%s] Associated with AP\n", TAG);
+            break;
+        default:
+            break;
+    }
+}
+
+// Deferred connect request (set by async handler, consumed by wifiLoop)
+static volatile bool     pendingConnect = false;
+static String            pendingSsid;
+static String            pendingPass;
+
 bool wifiInit() {
     WiFi.setHostname(appConfig.wifi.hostname.c_str());
+    WiFi.onEvent(onWiFiEvent);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);  // don't spam NVS with credential writes
 
     if (appConfig.wifi.ssid.length() > 0) {
         // Try STA mode
-        Serial.printf("[%s] Connecting to: %s\n", TAG, appConfig.wifi.ssid.c_str());
+        logCapture("[%s] Connecting to: %s\n", TAG, appConfig.wifi.ssid.c_str());
         WiFi.mode(WIFI_STA);
         WiFi.begin(appConfig.wifi.ssid.c_str(), appConfig.wifi.password.c_str());
 
@@ -33,25 +75,26 @@ bool wifiInit() {
 
         if (WiFi.status() == WL_CONNECTED) {
             currentMode = APP_WIFI_STA;
-            Serial.printf("[%s] Connected! IP: %s\n", TAG, WiFi.localIP().toString().c_str());
-            Serial.printf("[%s] RSSI: %d dBm\n", TAG, WiFi.RSSI());
+            lastGoodWiFiMs = millis();
+            logCapture("[%s] Connected! IP: %s\n", TAG, WiFi.localIP().toString().c_str());
+            logCapture("[%s] RSSI: %d dBm\n", TAG, WiFi.RSSI());
 
             #ifdef INCLUDE_MDNS
             if (MDNS.begin(appConfig.wifi.hostname.c_str())) {
                 MDNS.addService("http", "tcp", HTTP_PORT);
                 MDNS.addService("rtsp", "tcp", 554);
-                Serial.printf("[%s] mDNS: %s.local\n", TAG, appConfig.wifi.hostname.c_str());
+                logCapture("[%s] mDNS: %s.local\n", TAG, appConfig.wifi.hostname.c_str());
             }
             #endif
 
             return true;
         }
 
-        Serial.printf("[%s] STA connection failed, falling back to AP\n", TAG);
+        logCapture("[%s] STA connection failed, falling back to AP\n", TAG);
     }
 
     // AP mode with captive portal
-    Serial.printf("[%s] Starting AP: %s\n", TAG, DEFAULT_AP_SSID);
+    logCapture("[%s] Starting AP: %s\n", TAG, DEFAULT_AP_SSID);
     WiFi.mode(WIFI_AP);
     WiFi.softAP(DEFAULT_AP_SSID, DEFAULT_AP_PASS);
     delay(100);
@@ -61,7 +104,7 @@ bool wifiInit() {
     captivePortalActive = true;
     currentMode = APP_WIFI_SETUP;
 
-    Serial.printf("[%s] AP IP: %s\n", TAG, WiFi.softAPIP().toString().c_str());
+    logCapture("[%s] AP IP: %s\n", TAG, WiFi.softAPIP().toString().c_str());
     return true;
 }
 
@@ -70,15 +113,64 @@ void wifiLoop() {
         dnsServer.processNextRequest();
     }
 
-    // Auto-reconnect in STA mode
-    if (currentMode == APP_WIFI_STA && WiFi.status() != WL_CONNECTED) {
+    // Handle deferred connect request (from async web handler)
+    if (pendingConnect) {
+        String ssid = pendingSsid;
+        String pass = pendingPass;
+        pendingConnect = false;
+        pendingSsid = String();
+        pendingPass = String();
+        wifiConnect(ssid, pass);
+    }
+
+    // Auto-reconnect in STA mode. Two paths:
+    //   (1) status flipped to non-connected — clean case, try reconnect.
+    //   (2) status still CONNECTED but IP is 0.0.0.0 or RSSI dead for >90s —
+    //       the "silent death" where the stack thinks we're up but nothing
+    //       actually works. Force a disconnect + reconnect cycle.
+    if (currentMode == APP_WIFI_STA) {
         unsigned long now = millis();
-        if (now - lastReconnectAttempt > RECONNECT_INTERVAL) {
-            lastReconnectAttempt = now;
-            Serial.printf("[%s] WiFi disconnected, reconnecting...\n", TAG);
-            WiFi.reconnect();
+        bool statusOk = (WiFi.status() == WL_CONNECTED);
+        bool ipOk     = (uint32_t)WiFi.localIP() != 0;
+        bool rssiOk   = (WiFi.RSSI() != 0);
+
+        if (statusOk && ipOk && rssiOk) {
+            lastGoodWiFiMs = now;
+        }
+
+        // Case 1: hard disconnect (status flipped)
+        if (!statusOk) {
+            if (now - lastReconnectAttempt > RECONNECT_INTERVAL) {
+                lastReconnectAttempt = now;
+                logCapture("[%s] WiFi disconnected, reconnecting...\n", TAG);
+                #ifdef INCLUDE_EVENT_LOG
+                logEvent(EVT_WIFI_RECONNECT, "status lost");
+                #endif
+                WiFi.reconnect();
+            }
+        }
+        // Case 2: silent death — status lies. Forced full reset.
+        else if (lastGoodWiFiMs > 0 && (now - lastGoodWiFiMs) > WIFI_STALE_TIMEOUT_MS) {
+            if (now - lastReconnectAttempt > RECONNECT_INTERVAL) {
+                lastReconnectAttempt = now;
+                logCapture("[%s] WiFi silent death (no IP/RSSI %lus) — forcing reconnect\n",
+                              TAG, (now - lastGoodWiFiMs) / 1000);
+                #ifdef INCLUDE_EVENT_LOG
+                logEvent(EVT_WIFI_RECONNECT, "silent death");
+                #endif
+                WiFi.disconnect(false, true);
+                delay(100);
+                WiFi.begin(appConfig.wifi.ssid.c_str(), appConfig.wifi.password.c_str());
+                lastGoodWiFiMs = now;  // grace period to avoid immediate re-trigger
+            }
         }
     }
+}
+
+void wifiRequestConnect(const String& ssid, const String& password) {
+    pendingSsid = ssid;
+    pendingPass = password;
+    pendingConnect = true;
 }
 
 AppWiFiMode getWiFiCurrentMode() { return currentMode; }
@@ -123,7 +215,7 @@ String scanNetworksJson() {
 }
 
 bool wifiConnect(const String& ssid, const String& password) {
-    Serial.printf("[%s] Connecting to new network: %s\n", TAG, ssid.c_str());
+    logCapture("[%s] Connecting to new network: %s\n", TAG, ssid.c_str());
 
     // Stop captive portal if active
     if (captivePortalActive) {
@@ -150,7 +242,8 @@ bool wifiConnect(const String& ssid, const String& password) {
 
     if (WiFi.status() == WL_CONNECTED) {
         currentMode = APP_WIFI_STA;
-        Serial.printf("[%s] Connected! IP: %s\n", TAG, WiFi.localIP().toString().c_str());
+        lastGoodWiFiMs = millis();
+        logCapture("[%s] Connected! IP: %s\n", TAG, WiFi.localIP().toString().c_str());
 
         #ifdef INCLUDE_MDNS
         MDNS.begin(appConfig.wifi.hostname.c_str());
@@ -161,7 +254,7 @@ bool wifiConnect(const String& ssid, const String& password) {
     }
 
     // Failed - restart AP
-    Serial.printf("[%s] Connection failed, restarting AP\n", TAG);
+    logCapture("[%s] Connection failed, restarting AP\n", TAG);
     WiFi.mode(WIFI_AP);
     WiFi.softAP(DEFAULT_AP_SSID, DEFAULT_AP_PASS);
     dnsServer.start(53, "*", WiFi.softAPIP());

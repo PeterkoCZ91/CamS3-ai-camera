@@ -3,12 +3,11 @@
 
 #include <Arduino.h>
 
-// Tracker configuration
+// Tracker fixed capacity — buffer sizing only; not tunable at runtime.
 #define TRACKER_MAX_TRACKS      16
 #define TRACKER_MAX_DETECTIONS  16
-#define TRACKER_CONFIRM_HITS    3    // Hits to confirm a track
-#define TRACKER_MAX_MISSES      5    // Misses before deletion
-#define TRACKER_MATCH_DIST      40   // Max pixel distance for matching (64x64 space)
+// Behavioural thresholds (confirm_hits, max_misses, match_dist) live in
+// appConfig.tracker and are read on each trackerUpdate() call.
 
 enum TrackState {
     TRACK_TENTATIVE = 0,

@@ -25,7 +25,10 @@ bool isCaptivePortalActive();
 // Scan networks
 String scanNetworksJson();
 
-// Connect to new network
+// Connect to new network (blocking — up to ~10s). Do not call from async web handlers.
 bool wifiConnect(const String& ssid, const String& password);
+
+// Request a deferred connect from main loop — safe from async contexts.
+void wifiRequestConnect(const String& ssid, const String& password);
 
 #endif // WIFI_MANAGER_H
