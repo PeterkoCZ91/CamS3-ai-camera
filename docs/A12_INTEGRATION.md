@@ -5,6 +5,26 @@ service that does the heavy detection off-device: it consumes the camera's MJPEG
 stream continuously and runs its own models (a YOLO-class detector over the COCO
 classes, optional face recognition, and a vision model for scene descriptions).
 
+## Where A12 is
+
+A12 is Python, and it lives in the sibling repository — not in this one:
+
+> **[PeterkoCZ91/DFR1154-ai-camera](https://github.com/PeterkoCZ91/DFR1154-ai-camera)** →
+> [`a12_system/`](https://github.com/PeterkoCZ91/DFR1154-ai-camera/tree/main/a12_system)
+
+```bash
+git clone https://github.com/PeterkoCZ91/DFR1154-ai-camera.git
+cd DFR1154-ai-camera/a12_system
+cat DOCKER.md            # multi-instance deployment
+python3 -m pytest .      # the suite should be green before you start
+```
+
+Point it at this camera by setting `camera_url` in its config; everything else in
+this document is the contract between the two. A12 was written against that repo's
+own DFRobot-based firmware, so where the two cameras differ this document says so
+explicitly — see **Topic names do not line up out of the box** below, and the
+field-naming note under **Liveness**.
+
 Get the division of labour right, because it is the opposite of what "edge AI"
 usually implies:
 

@@ -473,6 +473,13 @@ The companion service (**A12**) does the heavy detection off-device: it consumes
 pairing is a stable frame source plus cheap always-on gating — not a detector that
 occasionally asks for help. A12 polls `/health` for liveness.
 
+**A12 is not in this repository.** It is Python and it lives in the sibling repo:
+[PeterkoCZ91/DFR1154-ai-camera](https://github.com/PeterkoCZ91/DFR1154-ai-camera)
+→ [`a12_system/`](https://github.com/PeterkoCZ91/DFR1154-ai-camera/tree/main/a12_system).
+Set its `camera_url` to this camera and see
+[`docs/A12_INTEGRATION.md`](docs/A12_INTEGRATION.md) — including the two places where
+the topic and field names do not line up by default.
+
 `GET /a12/status` (alias `/api/a12/status`) is one flat JSON document offered for
 automation and dashboards: identity, stream URLs, capture counters, `frame_age_ms`,
 detection state including `person_decision` / `person_top_score` /
