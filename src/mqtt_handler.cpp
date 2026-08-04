@@ -405,8 +405,19 @@ void mqttInit() {
 }
 
 void mqttPublishMotion(bool detected) {
+    const char* payload = detected ? "ON" : "OFF";
+
+    // Home Assistant's discovery config points at <prefix>/motion/state.
     String topic = topicBase() + "/motion/state";
-    mqttPublishOrQueue(topic.c_str(), detected ? "ON" : "OFF", true, 0);
+    mqttPublishOrQueue(topic.c_str(), payload, true, 0);
+
+    // The A12 companion subscribes to <prefix>/motion — without the /state suffix —
+    // and uses it to open a YOLO window and force a detection pass. Publishing only
+    // the HA spelling meant that gate never fired: A12 fell back to its own frame
+    // differencing and the camera's motion detector contributed nothing to it.
+    // Two publishes of a 2-3 byte payload on a state change is not worth optimizing.
+    String flat = topicBase() + "/motion";
+    mqttPublishOrQueue(flat.c_str(), payload, true, 0);
 }
 
 void mqttPublishPerson(bool detected, int count) {

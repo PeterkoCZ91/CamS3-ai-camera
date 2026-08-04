@@ -111,7 +111,8 @@ Published by the camera:
 | Topic | Payload | Retained | Notes |
 |---|---|---|---|
 | `<prefix>/availability` | `online` / `offline` | yes | `offline` is also the MQTT will, so a hard crash marks the camera down |
-| `<prefix>/motion/state` | `ON` / `OFF` | yes | Edge-triggered |
+| `<prefix>/motion/state` | `ON` / `OFF` | yes | Edge-triggered. Home Assistant reads this one. |
+| `<prefix>/motion` | `ON` / `OFF` | yes | Same value, flat name — A12 reads this one (see below) |
 | `<prefix>/person/state` | `ON` / `OFF` | yes | Only for `CONFIDENT` |
 | `<prefix>/person/attributes` | `{"count":N}` | yes | Confirmed tracks |
 | `<prefix>/person_uncertain` | `{"confidence":0.68,"tracks":1}` | no | Hint: "I saw something, I am not sure" |
@@ -128,17 +129,26 @@ someone loitering in a badly lit spot cannot flood the broker.
 A12 subscribes to two hint topics under a **different naming scheme** than this
 firmware publishes:
 
-| A12 subscribes to | This firmware publishes | Match? |
-|---|---|---|
-| `esp32cam/<device>/person_uncertain` | `<prefix>/person_uncertain` | Only if `mqtt_topic_prefix` is set to `esp32cam/<device>` |
-| `esp32cam/<device>/motion` (`ON`/`OFF`) | `<prefix>/motion/state` | **No** — the trailing `/state` does not match even with the prefix above |
+| A12 subscribes to | This firmware publishes |
+|---|---|
+| `esp32cam/<device>/person_uncertain` | `<prefix>/person_uncertain` |
+| `esp32cam/<device>/motion` (`ON`/`OFF`) | `<prefix>/motion` — published alongside `<prefix>/motion/state`, which is what Home Assistant's discovery points at |
 
 `<device>` is A12's `esp32_mqtt_device` setting (default `ESP32-Camera`).
 
-So: set `mqtt_topic_prefix` to `esp32cam/<device>` and the `person_uncertain` hint
-reaches A12's YOLO routing. The motion hint does not arrive under any prefix — which
-costs nothing important, because A12 sees motion in the stream it is already
-decoding. Treat both as optimizations, not as the integration.
+**So set `mqtt_topic_prefix` to `esp32cam/<device>` and both hints line up.** Nothing
+else breaks when you do: Home Assistant discovery, availability and the telemetry
+topics all follow the same prefix.
+
+These hints are not cosmetic. A12 uses either of them to open a ~15 s window in which
+it forces a YOLO pass, and the motion hint is OR'd into its own motion decision. With
+a mismatched prefix A12 still works — it does its own frame differencing — but the
+camera's motion detector, which sees a clean full-resolution frame before JPEG
+transport, contributes nothing to it.
+
+The firmware publishes motion under both names for exactly this reason: earlier
+versions emitted only `<prefix>/motion/state`, so the gate never fired no matter how
+the prefix was set.
 
 Subscribed by the camera — A12 (or Home Assistant, or anything else) can change
 settings without an HTTP round trip:
