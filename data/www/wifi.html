@@ -1,53 +1,46 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>Wi-Fi - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
+    <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
+         that the inline script below relies on. i18n.js stays deferred. -->
+    <script src="/common.js"></script>
+    <script src="/i18n.js" defer></script>
 </head>
 <body>
     <div class="page">
         <div class="pg-header">
-            <h1>Wi-Fi konfigurace</h1>
-            <a href="/" class="back-link">Zpet</a>
+            <h1 data-i18n="wifi.title">Wi-Fi configuration</h1>
+            <a href="/" class="back-link" data-i18n="nav.back">Back</a>
         </div>
 
-        <div class="nav-tabs">
-            <a href="/" class="nav-tab">Prehled</a>
-            <a href="/settings.html" class="nav-tab">Nastaveni</a>
-            <a href="/wifi.html" class="nav-tab active">Wi-Fi</a>
-            <a href="/admin.html" class="nav-tab">Admin</a>
-            <a href="/gallery.html" class="nav-tab">Galerie</a>
-        </div>
+        <nav class="nav-tabs" aria-label="Main" data-i18n-aria-label="aria.nav">
+            <a href="/"              class="nav-tab"        data-i18n="nav.overview">Overview</a>
+            <a href="/settings.html" class="nav-tab"        data-i18n="nav.settings">Settings</a>
+            <a href="/zones.html"    class="nav-tab"        data-i18n="nav.zones">Zones</a>
+            <a href="/wifi.html"     class="nav-tab active" aria-current="page" data-i18n="nav.wifi">Wi-Fi</a>
+            <a href="/admin.html"    class="nav-tab"        data-i18n="nav.admin">Admin</a>
+            <a href="/gallery.html"  class="nav-tab"        data-i18n="nav.gallery">Gallery</a>
+        </nav>
 
         <!-- Current status -->
         <div class="card" style="margin-bottom:20px">
             <div class="card-body">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-                    <span style="font-weight:600;color:#fff">Aktualni pripojeni</span>
+                    <span style="font-weight:600;color:#fff" data-i18n="wifi.current">Current connection</span>
                     <span class="status-badge" id="wifi-status">
                         <span class="status-dot" id="wifi-dot"></span>
                         <span id="wifi-mode">--</span>
                     </span>
                 </div>
                 <div class="info-grid" style="margin-bottom:0">
-                    <div class="info-card">
-                        <div class="label">IP</div>
-                        <div class="value" id="wifi-ip">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">RSSI</div>
-                        <div class="value" id="wifi-rssi">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">MAC</div>
-                        <div class="value" id="wifi-mac" style="font-size:.75em">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Hostname</div>
-                        <div class="value" id="wifi-hostname">--</div>
-                    </div>
+                    <div class="info-card"><div class="label" data-i18n="wifi.ip">IP</div><div class="value" id="wifi-ip">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="wifi.rssi">RSSI</div><div class="value" id="wifi-rssi">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="wifi.mac">MAC</div><div class="value" id="wifi-mac" style="font-size:.75em">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="wifi.hostname">Hostname</div><div class="value" id="wifi-hostname">--</div></div>
                 </div>
             </div>
         </div>
@@ -56,32 +49,28 @@
         <div class="card">
             <div class="card-body">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-                    <span style="font-weight:600;color:#fff">Dostupne site</span>
-                    <button class="btn btn-outline btn-sm" onclick="scanNetworks()">
-                        Vyhledat
-                    </button>
+                    <span style="font-weight:600;color:#fff" data-i18n="wifi.scan.title">Available networks</span>
+                    <button class="btn btn-outline btn-sm" onclick="scanNetworks()" data-i18n="common.scan">Scan</button>
                 </div>
-                <div id="network-list" style="color:var(--text-muted);font-size:.9em">
-                    Klikni "Vyhledat" pro nacteni siti
+                <div id="network-list" style="color:var(--text-muted);font-size:.9em" data-i18n="wifi.scan.hint">
+                    Click "Scan" to load networks
                 </div>
             </div>
         </div>
 
         <!-- Manual connect -->
         <details style="margin-top:12px">
-            <summary><span class="sec-color" style="background:var(--accent)"></span> Rucni pripojeni</summary>
+            <summary><span class="sec-color" style="background:var(--accent)"></span> <span data-i18n="wifi.manual.title">Manual connect</span></summary>
             <div class="sec-body">
                 <div class="fg">
-                    <label for="manual-ssid">SSID</label>
-                    <input type="text" id="manual-ssid" placeholder="Nazev site">
+                    <label for="manual-ssid" data-i18n="wifi.manual.ssid">SSID</label>
+                    <input type="text" id="manual-ssid" data-i18n-placeholder="wifi.manual.ssid.ph" placeholder="Network name">
                 </div>
                 <div class="fg">
-                    <label for="manual-pass">Heslo</label>
-                    <input type="password" id="manual-pass" placeholder="Heslo site">
+                    <label for="manual-pass" data-i18n="wifi.manual.pass">Password</label>
+                    <input type="password" id="manual-pass" data-i18n-placeholder="wifi.manual.pass.ph" placeholder="Network password">
                 </div>
-                <button class="btn btn-primary btn-block" onclick="connectManual()">
-                    Pripojit
-                </button>
+                <button class="btn btn-primary btn-block" onclick="connectManual()" data-i18n="common.connect">Connect</button>
             </div>
         </details>
     </div>
@@ -89,43 +78,70 @@
     <div id="toast" class="toast"></div>
 
     <script>
+    // T() / escapeHtml() / showToast() come from common.js.
     function loadStatus() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            document.getElementById('wifi-ip').textContent = d.ip || '--';
-            document.getElementById('wifi-rssi').textContent = d.rssi ? d.rssi + ' dBm' : 'N/A';
-            document.getElementById('wifi-mac').textContent = d.mac || '--';
+        fetch('/api/status', { credentials: 'same-origin' }).then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(d => {
+            document.getElementById('wifi-ip').textContent       = d.ip || '--';
+            document.getElementById('wifi-rssi').textContent     = d.rssi ? d.rssi + ' dBm' : 'N/A';
+            document.getElementById('wifi-mac').textContent      = d.mac || '--';
             document.getElementById('wifi-hostname').textContent = d.hostname || '--';
-            document.getElementById('wifi-mode').textContent = d.wifi_mode || '--';
+            document.getElementById('wifi-mode').textContent     = d.wifi_mode || '--';
             const dot = document.getElementById('wifi-dot');
             dot.className = 'status-dot' + (d.wifi_mode === 'STA' ? '' : ' warning');
+        }).catch(() => {
+            // Previously an unhandled rejection: the page just showed "--" forever.
+            document.getElementById('wifi-mode').textContent = T('common.offline');
+            document.getElementById('wifi-dot').className = 'status-dot error';
         });
     }
 
     function scanNetworks() {
         const list = document.getElementById('network-list');
-        list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">Vyhledavam...</div>';
+        list.textContent = '';
+        list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">' +
+            escapeHtml(T('wifi.scan.searching')) + '</div>';
 
         fetch('/api/wifi/scan').then(r => r.json()).then(networks => {
             if (!networks.length) {
-                list.innerHTML = '<div style="padding:12px;color:var(--text-muted)">Zadne site nenalezeny</div>';
+                list.innerHTML = '<div style="padding:12px;color:var(--text-muted)">' +
+                    escapeHtml(T('wifi.scan.none')) + '</div>';
                 return;
             }
-
-            let html = '';
+            list.innerHTML = '';
             networks.sort((a, b) => b.rssi - a.rssi);
             networks.forEach(n => {
-                const strength = n.rssi > -50 ? 'Vyborny' : n.rssi > -70 ? 'Dobry' : 'Slaby';
-                const lock = n.enc ? '&#128274;' : '&#128275;';
-                html += '<div class="file-item" style="cursor:pointer" onclick="selectNetwork(\'' +
-                    n.ssid.replace(/'/g, "\\'") + '\')">' +
-                    '<div><div class="file-name">' + lock + ' ' + n.ssid + '</div>' +
-                    '<div class="file-size">' + n.rssi + ' dBm - ' + strength + '</div></div>' +
-                    '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();selectNetwork(\'' +
-                    n.ssid.replace(/'/g, "\\'") + '\')">Pripojit</button></div>';
+                const strength = n.rssi > -50 ? T('wifi.strength.excellent')
+                                : n.rssi > -70 ? T('wifi.strength.good')
+                                               : T('wifi.strength.weak');
+                const lock = n.enc ? '\uD83D\uDD12' : '\uD83D\uDD13';
+
+                const row = document.createElement('div');
+                row.className = 'file-item';
+                row.style.cursor = 'pointer';
+                row.addEventListener('click', () => selectNetwork(n.ssid));
+
+                const info = document.createElement('div');
+                const name = document.createElement('div'); name.className = 'file-name';
+                name.textContent = lock + ' ' + n.ssid;
+                const size = document.createElement('div'); size.className = 'file-size';
+                // En-dash as a parenthetical separator, per Czech typography (ČSN 01 6910).
+                size.textContent = n.rssi + ' dBm – ' + strength;
+                info.appendChild(name); info.appendChild(size);
+
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-outline btn-sm';
+                btn.textContent = T('common.connect');
+                btn.addEventListener('click', e => { e.stopPropagation(); selectNetwork(n.ssid); });
+
+                row.appendChild(info); row.appendChild(btn);
+                list.appendChild(row);
             });
-            list.innerHTML = html;
         }).catch(() => {
-            list.innerHTML = '<div style="padding:12px;color:var(--red)">Chyba pri vyhledavani</div>';
+            list.innerHTML = '<div style="padding:12px;color:var(--red)">' +
+                escapeHtml(T('wifi.scan.error')) + '</div>';
         });
     }
 
@@ -133,18 +149,17 @@
         document.getElementById('manual-ssid').value = ssid;
         document.getElementById('manual-pass').value = '';
         document.getElementById('manual-pass').focus();
-        // Open manual connect section
         document.querySelector('details').open = true;
     }
 
     function connectManual() {
         const ssid = document.getElementById('manual-ssid').value;
         const pass = document.getElementById('manual-pass').value;
-        if (!ssid) { showToast('Zadejte SSID', 'error'); return; }
+        if (!ssid) { showToast(T('wifi.manual.ssid.required'), 'error'); return; }
 
-        showToast('Pripojuji k ' + ssid + '...', 'info');
+        showToast(T('wifi.connecting.to') + ' ' + ssid + '...', 'info');
 
-        fetch('/api/wifi', {
+        apiFetch('/api/wifi', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ssid: ssid, password: pass})
@@ -153,17 +168,10 @@
         .then(result => {
             showToast(result.message, result.success ? 'success' : 'error');
             if (result.success) {
-                setTimeout(() => { showToast('Kamera se pripojuje, stranka muze byt nedostupna...', 'info'); }, 2000);
+                setTimeout(() => { showToast(T('wifi.connecting.note'), 'info'); }, 2000);
             }
         })
-        .catch(() => showToast('Chyba pripojeni', 'error'));
-    }
-
-    function showToast(text, type) {
-        const t = document.getElementById('toast');
-        t.textContent = text;
-        t.className = 'toast ' + type + ' show';
-        setTimeout(() => t.className = 'toast', 4000);
+        .catch(() => showToast(T('common.offline'), 'error'));
     }
 
     loadStatus();

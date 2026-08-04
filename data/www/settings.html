@@ -1,54 +1,62 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Nastaveni - CamS3</title>
+    <title>Settings - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
+    <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
+         that the inline script below relies on. i18n.js stays deferred. -->
+    <script src="/common.js"></script>
+    <script src="/i18n.js" defer></script>
 </head>
 <body>
     <div class="page">
         <div class="pg-header">
-            <h1>Nastaveni kamery</h1>
-            <a href="/" class="back-link">Zpet</a>
+            <h1 data-i18n="settings.title">Camera settings</h1>
+            <a href="/" class="back-link" data-i18n="nav.back">Back</a>
         </div>
 
-        <div class="nav-tabs">
-            <a href="/" class="nav-tab">Prehled</a>
-            <a href="/settings.html" class="nav-tab active">Nastaveni</a>
-            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
-            <a href="/admin.html" class="nav-tab">Admin</a>
-            <a href="/gallery.html" class="nav-tab">Galerie</a>
-        </div>
+        <nav class="nav-tabs" aria-label="Main" data-i18n-aria-label="aria.nav">
+            <a href="/"              class="nav-tab"        data-i18n="nav.overview">Overview</a>
+            <a href="/settings.html" class="nav-tab active" aria-current="page" data-i18n="nav.settings">Settings</a>
+            <a href="/zones.html"    class="nav-tab"        data-i18n="nav.zones">Zones</a>
+            <a href="/wifi.html"     class="nav-tab"        data-i18n="nav.wifi">Wi-Fi</a>
+            <a href="/admin.html"    class="nav-tab"        data-i18n="nav.admin">Admin</a>
+            <a href="/gallery.html"  class="nav-tab"        data-i18n="nav.gallery">Gallery</a>
+        </nav>
 
         <form id="settingsForm">
-            <!-- Basic Settings -->
+            <!-- Basic -->
             <details open>
-                <summary><span class="sec-color" style="background:var(--accent)"></span> Zakladni nastaveni</summary>
+                <summary><span class="sec-color" style="background:var(--accent)"></span> <span data-i18n="settings.basic">Basic settings</span></summary>
                 <div class="sec-body">
                     <div class="fg">
-                        <label for="jpeg_quality">Kvalita JPEG (1-63, nizsi = lepsi)</label>
+                        <label for="jpeg_quality" data-i18n="settings.jpeg_quality">JPEG quality (1-63, lower = better)</label>
                         <input type="number" id="jpeg_quality" min="1" max="63" value="12">
                     </div>
                     <div class="fg">
-                        <label for="frame_size">Rozliseni</label>
+                        <label for="frame_size" data-i18n="settings.frame_size">Resolution</label>
                         <select id="frame_size">
                             <option value="5">QVGA (320x240)</option>
                             <option value="6">CIF (400x296)</option>
                             <option value="8">VGA (640x480)</option>
                             <option value="9">SVGA (800x600)</option>
                             <option value="10">XGA (1024x768)</option>
+                            <option value="11">HD (1280x720)</option>
                             <option value="12">SXGA (1280x1024)</option>
                             <option value="13">UXGA (1600x1200)</option>
-                            <option value="18">FHD (1920x1080)</option>
+                            <!-- 18 is QHD 2560x1440, not FHD (FHD is 14). Sizes above
+                                 UXGA are not sustainable on the PY260 driver — see
+                                 include/config.h — so they are deliberately absent. -->
                         </select>
                     </div>
                     <div class="toggle-row">
-                        <span>Prevratit svisle (V-Flip)</span>
+                        <label for="vflip" data-i18n="settings.vflip">Flip vertically (V-Flip)</label>
                         <label class="toggle"><input type="checkbox" id="vflip"><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Zrcadlit horizontalne (H-Mirror)</span>
+                        <label for="hmirror" data-i18n="settings.hmirror">Mirror horizontally (H-Mirror)</label>
                         <label class="toggle"><input type="checkbox" id="hmirror"><span class="slider"></span></label>
                     </div>
                 </div>
@@ -56,38 +64,38 @@
 
             <!-- Image Tuning -->
             <details>
-                <summary><span class="sec-color" style="background:var(--purple)"></span> Obraz</summary>
+                <summary><span class="sec-color" style="background:var(--purple)"></span> <span data-i18n="settings.image">Image</span></summary>
                 <div class="sec-body">
                     <div class="fg">
-                        <label>Jas (-2 az 2)</label>
+                        <label for="brightness" data-i18n="settings.brightness">Brightness (-2 to 2)</label>
                         <div class="range-wrap">
                             <input type="range" id="brightness" min="-2" max="2" value="0" step="1">
                             <span class="range-badge" id="brightness-val">0</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Kontrast (-2 az 2)</label>
+                        <label for="contrast" data-i18n="settings.contrast">Contrast (-2 to 2)</label>
                         <div class="range-wrap">
                             <input type="range" id="contrast" min="-2" max="2" value="0" step="1">
                             <span class="range-badge" id="contrast-val">0</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Saturace (-2 az 2)</label>
+                        <label for="saturation" data-i18n="settings.saturation">Saturation (-2 to 2)</label>
                         <div class="range-wrap">
                             <input type="range" id="saturation" min="-2" max="2" value="0" step="1">
                             <span class="range-badge" id="saturation-val">0</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Ostrost (-3 az 3)</label>
+                        <label for="sharpness" data-i18n="settings.sharpness">Sharpness (-3 to 3)</label>
                         <div class="range-wrap">
                             <input type="range" id="sharpness" min="-3" max="3" value="0" step="1">
                             <span class="range-badge" id="sharpness-val">0</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Odstraneni sumu (0-8)</label>
+                        <label for="denoise" data-i18n="settings.denoise">Denoise (0-8)</label>
                         <div class="range-wrap">
                             <input type="range" id="denoise" min="0" max="8" value="0" step="1">
                             <span class="range-badge" id="denoise-val">0</span>
@@ -98,40 +106,40 @@
 
             <!-- Auto Controls -->
             <details>
-                <summary><span class="sec-color" style="background:var(--yellow)"></span> Automaticke kontroly</summary>
+                <summary><span class="sec-color" style="background:var(--yellow)"></span> <span data-i18n="settings.exposure">Exposure &amp; gain</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>Auto Exposure (AEC)</span>
+                        <label for="aec" data-i18n="settings.aec">Auto Exposure (AEC)</label>
                         <label class="toggle"><input type="checkbox" id="aec" checked><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>AE Level (-2 az 2)</label>
+                        <label for="ae_level" data-i18n="settings.ae_level">AE Level (-2 to 2)</label>
                         <div class="range-wrap">
                             <input type="range" id="ae_level" min="-2" max="2" value="0" step="1">
                             <span class="range-badge" id="ae_level-val">0</span>
                         </div>
-                        <small>-2 = tmavsi, +2 = svetlejsi</small>
+                        <small data-i18n="settings.ae_level.hint">-2 = darker, +2 = brighter</small>
                     </div>
                     <div class="fg" id="aec_manual_group" style="display:none">
-                        <label>Manual Exposure (0-1200)</label>
+                        <label for="aec_value" data-i18n="settings.manual_exposure">Manual Exposure (0-1200)</label>
                         <div class="range-wrap">
                             <input type="range" id="aec_value" min="0" max="1200" value="300" step="10">
                             <span class="range-badge" id="aec_value-val">300</span>
                         </div>
                     </div>
                     <div class="toggle-row">
-                        <span>Auto Gain (AGC)</span>
+                        <label for="agc" data-i18n="settings.agc">Auto Gain (AGC)</label>
                         <label class="toggle"><input type="checkbox" id="agc" checked><span class="slider"></span></label>
                     </div>
                     <div class="fg" id="agc_manual_group" style="display:none">
-                        <label>Manual Gain (0-30)</label>
+                        <label for="agc_gain" data-i18n="settings.manual_gain">Manual Gain (0-30)</label>
                         <div class="range-wrap">
                             <input type="range" id="agc_gain" min="0" max="30" value="0" step="1">
                             <span class="range-badge" id="agc_gain-val">0</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Gain Ceiling</label>
+                        <label for="gainceiling" data-i18n="settings.gainceiling">Gain Ceiling</label>
                         <select id="gainceiling">
                             <option value="0">2x</option>
                             <option value="1">4x</option>
@@ -143,40 +151,40 @@
                         </select>
                     </div>
                     <div class="toggle-row">
-                        <span>Auto White Balance</span>
+                        <label for="awb" data-i18n="settings.awb">Auto White Balance</label>
                         <label class="toggle"><input type="checkbox" id="awb" checked><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>White Balance Mode</label>
+                        <label for="wb_mode" data-i18n="settings.wb_mode">White Balance Mode</label>
                         <select id="wb_mode">
-                            <option value="0">Auto</option>
-                            <option value="1">Sunny</option>
-                            <option value="2">Cloudy</option>
-                            <option value="3">Office</option>
-                            <option value="4">Home</option>
+                            <option value="0" data-i18n="settings.wb.auto">Auto</option>
+                            <option value="1" data-i18n="settings.wb.sunny">Sunny</option>
+                            <option value="2" data-i18n="settings.wb.cloudy">Cloudy</option>
+                            <option value="3" data-i18n="settings.wb.office">Office</option>
+                            <option value="4" data-i18n="settings.wb.home">Home</option>
                         </select>
                     </div>
                 </div>
             </details>
 
-            <!-- Advanced Corrections -->
+            <!-- Sensor Corrections -->
             <details>
-                <summary><span class="sec-color" style="background:#64748b"></span> Korekce snimace</summary>
+                <summary><span class="sec-color" style="background:#64748b"></span> <span data-i18n="settings.sensor_corrections">Sensor corrections</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>Black Pixel Correction (BPC)</span>
+                        <label for="bpc" data-i18n="settings.bpc">Black Pixel Correction (BPC)</label>
                         <label class="toggle"><input type="checkbox" id="bpc" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>White Pixel Correction (WPC)</span>
+                        <label for="wpc" data-i18n="settings.wpc">White Pixel Correction (WPC)</label>
                         <label class="toggle"><input type="checkbox" id="wpc" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Gamma Correction</span>
+                        <label for="raw_gma" data-i18n="settings.gamma">Gamma Correction</label>
                         <label class="toggle"><input type="checkbox" id="raw_gma" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Lens Correction</span>
+                        <label for="lenc" data-i18n="settings.lens">Lens Correction</label>
                         <label class="toggle"><input type="checkbox" id="lenc" checked><span class="slider"></span></label>
                     </div>
                 </div>
@@ -184,44 +192,51 @@
 
             <!-- Motion Detection -->
             <details>
-                <summary><span class="sec-color" style="background:var(--green)"></span> Detekce pohybu</summary>
+                <summary><span class="sec-color" style="background:var(--green)"></span> <span data-i18n="settings.motion">Motion detection</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>Detekce pohybu zapnuta</span>
+                        <label for="motion_enabled" data-i18n="settings.motion.enabled">Motion detection enabled</label>
                         <label class="toggle"><input type="checkbox" id="motion_enabled"><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>Citlivost (1-100, vyssi = citlivejsi)</label>
+                        <label for="motion_threshold" data-i18n="settings.motion.sensitivity">Pixel threshold (5-80, lower = more sensitive)</label>
                         <div class="range-wrap">
-                            <input type="range" id="motion_threshold" min="1" max="100" value="15" step="1">
-                            <span class="range-badge" id="motion_threshold-val">15</span>
+                            <input type="range" id="motion_threshold" min="5" max="80" value="20" step="1">
+                            <span class="range-badge" id="motion_threshold-val">20</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Cooldown mezi detekcemi (s)</label>
+                        <label for="motion_cooldown" data-i18n="settings.motion.cooldown">Cooldown between detections (s)</label>
                         <input type="number" id="motion_cooldown" min="1" max="3600" value="10">
                     </div>
                     <div class="fg">
-                        <label>Max oblast % (odmitne zmenu osvetleni)</label>
+                        <label for="motion_min_area" data-i18n="settings.motion.min_area">Min area % to trigger</label>
                         <div class="range-wrap">
-                            <input type="range" id="motion_max_area" min="20" max="100" value="70" step="5">
-                            <span class="range-badge" id="motion_max_area-val">70</span>
+                            <input type="range" id="motion_min_area" min="1" max="50" value="5" step="1">
+                            <span class="range-badge" id="motion_min_area-val">5</span>
+                        </div>
+                    </div>
+                    <div class="fg">
+                        <label for="motion_max_area" data-i18n="settings.motion.max_area">Max area % (rejects lighting changes)</label>
+                        <div class="range-wrap">
+                            <input type="range" id="motion_max_area" min="10" max="100" value="50" step="5">
+                            <span class="range-badge" id="motion_max_area-val">50</span>
                         </div>
                     </div>
                     <div class="toggle-row">
-                        <span>Temporalni filtr (2+ snimky)</span>
+                        <label for="motion_temporal_filter" data-i18n="settings.motion.temporal">Temporal filter (2+ frames)</label>
                         <label class="toggle"><input type="checkbox" id="motion_temporal_filter" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Prostorovy filtr (odmitne izolace)</span>
+                        <label for="motion_spatial_filter" data-i18n="settings.motion.spatial">Spatial filter (reject isolated blocks)</label>
                         <label class="toggle"><input type="checkbox" id="motion_spatial_filter" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Nocni potlaceni</span>
+                        <label for="motion_night_suppress" data-i18n="settings.motion.night">Night suppression</label>
                         <label class="toggle"><input type="checkbox" id="motion_night_suppress" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Ukladat na SD kartu</span>
+                        <label for="motion_save_sd" data-i18n="settings.save_sd">Save to SD card</label>
                         <label class="toggle"><input type="checkbox" id="motion_save_sd"><span class="slider"></span></label>
                     </div>
                 </div>
@@ -229,43 +244,93 @@
 
             <!-- Face Detection -->
             <details>
-                <summary><span class="sec-color" style="background:#e11d48"></span> Detekce obliceju</summary>
+                <summary><span class="sec-color" style="background:#e11d48"></span> <span data-i18n="settings.face">Face detection</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>Detekce obliceju zapnuta</span>
+                        <label for="face_detect_enabled" data-i18n="settings.face.enabled">Face detection enabled</label>
                         <label class="toggle"><input type="checkbox" id="face_detect_enabled"><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Dvoustupnova detekce (presnejsi)</span>
+                        <label for="face_detect_two_stage" data-i18n="settings.face.two_stage">Two-stage detection (more accurate)</label>
                         <label class="toggle"><input type="checkbox" id="face_detect_two_stage" checked><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>Cooldown mezi detekcemi (s)</label>
+                        <label for="face_detect_cooldown" data-i18n="settings.face.cooldown">Cooldown between detections (s)</label>
                         <input type="number" id="face_detect_cooldown" min="1" max="300" value="5">
                     </div>
                     <div class="toggle-row">
-                        <span>Ukladat oblicej na SD</span>
+                        <label for="face_detect_save_sd" data-i18n="settings.face.save_sd">Save face to SD</label>
                         <label class="toggle"><input type="checkbox" id="face_detect_save_sd"><span class="slider"></span></label>
                     </div>
-                    <small style="display:block;padding:8px 0;color:var(--text-muted)">Detekce obliceju se spousti pouze pri detekovem pohybu (kaskada).</small>
+                    <small style="display:block;padding:8px 0;color:var(--text-muted)">
+                        <span data-i18n="settings.face.cascade_hint">Face detection runs only when motion is detected (cascade).</span>
+                    </small>
+                </div>
+            </details>
+
+            <!-- Person Detection (FOMO) -->
+            <details>
+                <summary><span class="sec-color" style="background:#8b5cf6"></span> <span data-i18n="settings.person">Person detection (FOMO)</span></summary>
+                <div class="sec-body">
+                    <div class="toggle-row">
+                        <label for="person_detect_enabled" data-i18n="settings.person.enabled">Person detection enabled</label>
+                        <label class="toggle"><input type="checkbox" id="person_detect_enabled"><span class="slider"></span></label>
+                    </div>
+                    <div class="fg">
+                        <label for="person_detect_confidence" data-i18n="settings.person.confidence">Uncertain threshold (MQTT verification)</label>
+                        <div class="range-wrap">
+                            <input type="range" id="person_detect_confidence" min="5" max="99" value="60" step="1">
+                            <span class="range-badge" id="person_detect_confidence-val">60</span>
+                        </div>
+                    </div>
+                    <div class="fg">
+                        <label for="person_confident_threshold" data-i18n="settings.person.confident">Confident threshold (direct alert)</label>
+                        <div class="range-wrap">
+                            <input type="range" id="person_confident_threshold" min="5" max="100" value="75" step="1">
+                            <span class="range-badge" id="person_confident_threshold-val">75</span>
+                        </div>
+                    </div>
+                    <div class="fg">
+                        <label for="person_detect_temporal" data-i18n="settings.person.temporal">Consecutive frames required</label>
+                        <input type="number" id="person_detect_temporal" min="1" max="10" value="2">
+                    </div>
+                    <div class="fg">
+                        <label for="person_detect_cooldown" data-i18n="settings.person.cooldown">Cooldown between detections (s)</label>
+                        <input type="number" id="person_detect_cooldown" min="0" max="3600" value="10">
+                    </div>
+                    <div class="toggle-row">
+                        <label for="person_detect_save_sd" data-i18n="settings.save_sd">Save to SD card</label>
+                        <label class="toggle"><input type="checkbox" id="person_detect_save_sd"><span class="slider"></span></label>
+                    </div>
+                    <div class="toggle-row">
+                        <label for="telegram_notify_on_person" data-i18n="settings.person.tg_notify">Telegram notification</label>
+                        <label class="toggle"><input type="checkbox" id="telegram_notify_on_person" checked><span class="slider"></span></label>
+                    </div>
+                    <div class="toggle-row">
+                        <label for="telegram_photo_on_person" data-i18n="settings.person.tg_photo">Telegram photo</label>
+                        <label class="toggle"><input type="checkbox" id="telegram_photo_on_person" checked><span class="slider"></span></label>
+                    </div>
+                    <small style="display:block;padding:8px 0;color:var(--text-muted)">
+                        <span data-i18n="settings.person.cascade_hint">Person detection runs only after motion is detected (cascade).</span>
+                    </small>
                 </div>
             </details>
 
             <!-- Timelapse -->
             <details>
-                <summary><span class="sec-color" style="background:var(--yellow)"></span> Timelapse</summary>
+                <summary><span class="sec-color" style="background:var(--yellow)"></span> <span data-i18n="settings.timelapse">Time-lapse</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>Timelapse zapnut</span>
+                        <label for="timelapse_enabled" data-i18n="settings.timelapse.enabled">Time-lapse enabled</label>
                         <label class="toggle"><input type="checkbox" id="timelapse_enabled"><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>Interval (sekundy)</label>
+                        <label for="timelapse_interval" data-i18n="settings.timelapse.interval">Interval (seconds)</label>
                         <input type="number" id="timelapse_interval" min="5" max="86400" value="60">
-                        <small>60s = kazda minuta, 3600s = kazda hodina</small>
+                        <small data-i18n="settings.timelapse.interval_hint">60s = every minute, 3600s = every hour</small>
                     </div>
                     <div class="toggle-row">
-                        <span>Ukladat na SD</span>
+                        <label for="timelapse_save_sd" data-i18n="settings.save_sd">Save to SD card</label>
                         <label class="toggle"><input type="checkbox" id="timelapse_save_sd" checked><span class="slider"></span></label>
                     </div>
                 </div>
@@ -273,98 +338,130 @@
 
             <!-- Telegram -->
             <details>
-                <summary><span class="sec-color" style="background:#0088cc"></span> Telegram</summary>
+                <summary><span class="sec-color" style="background:#0088cc"></span> <span data-i18n="settings.telegram">Telegram</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>Telegram zapnuto</span>
+                        <label for="telegram_enabled" data-i18n="settings.telegram.enabled">Telegram enabled</label>
                         <label class="toggle"><input type="checkbox" id="telegram_enabled"><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>Bot Token</label>
+                        <label for="telegram_bot_token" data-i18n="settings.telegram.bot_token">Bot Token</label>
                         <input type="password" id="telegram_bot_token" placeholder="123456:ABC-DEF...">
-                        <small>Ziskej od @BotFather na Telegramu</small>
+                        <small data-i18n="settings.telegram.bot_token_hint">Get from @BotFather on Telegram</small>
+                        <small id="telegram_token_status" style="color:var(--text-muted)"></small>
                     </div>
                     <div class="fg">
-                        <label>Chat ID</label>
+                        <label for="telegram_chat_id" data-i18n="settings.telegram.chat_id">Chat ID</label>
                         <input type="text" id="telegram_chat_id" placeholder="123456789">
-                        <small>Ziskej od @userinfobot</small>
+                        <small data-i18n="settings.telegram.chat_id_hint">Get from @userinfobot</small>
                     </div>
                     <div class="toggle-row">
-                        <span>Notifikace pri pohybu</span>
+                        <label for="telegram_notify_on_motion" data-i18n="settings.telegram.notify_motion">Notify on motion</label>
                         <label class="toggle"><input type="checkbox" id="telegram_notify_on_motion" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Foto pri pohybu</span>
+                        <label for="telegram_photo_on_motion" data-i18n="settings.telegram.photo_motion">Photo on motion</label>
                         <label class="toggle"><input type="checkbox" id="telegram_photo_on_motion" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Notifikace pri obliceji</span>
+                        <label for="telegram_notify_on_face" data-i18n="settings.telegram.notify_face">Notify on face</label>
                         <label class="toggle"><input type="checkbox" id="telegram_notify_on_face" checked><span class="slider"></span></label>
                     </div>
                     <div class="toggle-row">
-                        <span>Foto pri obliceji</span>
+                        <label for="telegram_photo_on_face" data-i18n="settings.telegram.photo_face">Photo on face</label>
                         <label class="toggle"><input type="checkbox" id="telegram_photo_on_face" checked><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>Cooldown (5-300s)</label>
+                        <label for="telegram_cooldown" data-i18n="settings.telegram.cooldown">Cooldown (5-300s)</label>
                         <div class="range-wrap">
                             <input type="range" id="telegram_cooldown" min="5" max="300" value="30" step="5">
                             <span class="range-badge" id="telegram_cooldown-val">30</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>Aktivni hodiny - zacatek (0-23)</label>
+                        <label for="telegram_active_start" data-i18n="settings.telegram.active_start">Active hours - start (0-23)</label>
                         <input type="number" id="telegram_active_start" min="0" max="23" value="0">
                     </div>
                     <div class="fg">
-                        <label>Aktivni hodiny - konec (0-23)</label>
+                        <label for="telegram_active_end" data-i18n="settings.telegram.active_end">Active hours - end (0-23)</label>
                         <input type="number" id="telegram_active_end" min="0" max="23" value="23">
-                        <small>Podpora pres pulnoc (napr. 22-7)</small>
+                        <small data-i18n="settings.telegram.active_hint">Overnight wrap supported (e.g. 22-7)</small>
                     </div>
                 </div>
             </details>
 
             <!-- MQTT -->
             <details>
-                <summary><span class="sec-color" style="background:#3b82f6"></span> MQTT</summary>
+                <summary><span class="sec-color" style="background:#3b82f6"></span> <span data-i18n="settings.mqtt">MQTT</span></summary>
                 <div class="sec-body">
                     <div class="toggle-row">
-                        <span>MQTT zapnuto</span>
+                        <label for="mqtt_enabled" data-i18n="settings.mqtt.enabled">MQTT enabled</label>
                         <label class="toggle"><input type="checkbox" id="mqtt_enabled"><span class="slider"></span></label>
                     </div>
                     <div class="fg">
-                        <label>MQTT server</label>
+                        <label for="mqtt_server" data-i18n="settings.mqtt.server">MQTT server</label>
                         <input type="text" id="mqtt_server" placeholder="192.168.1.100">
                     </div>
                     <div class="fg">
-                        <label>Port</label>
+                        <label for="mqtt_port" data-i18n="settings.mqtt.port">Port</label>
                         <input type="number" id="mqtt_port" min="1" max="65535" value="1883">
                     </div>
                     <div class="fg">
-                        <label>Topic prefix</label>
+                        <label for="mqtt_topic_prefix" data-i18n="settings.mqtt.topic_prefix">Topic prefix</label>
                         <input type="text" id="mqtt_topic_prefix" value="cams3">
+                    </div>
+                    <div class="fg">
+                        <label for="mqtt_user" data-i18n="settings.mqtt.user">Username (leave empty to keep)</label>
+                        <input type="text" id="mqtt_user" autocomplete="off" placeholder="">
+                    </div>
+                    <div class="fg">
+                        <label for="mqtt_pass" data-i18n="settings.mqtt.pass">Password (leave empty to keep)</label>
+                        <input type="password" id="mqtt_pass" autocomplete="new-password" placeholder="">
+                        <small id="mqtt_pass_status" style="color:var(--text-muted)"></small>
+                    </div>
+                    <div class="toggle-row">
+                        <label for="mqtt_tls_enabled" data-i18n="settings.mqtt.tls">TLS (needs /ca.pem for validation)</label>
+                        <label class="toggle"><input type="checkbox" id="mqtt_tls_enabled"><span class="slider"></span></label>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Security / admin credentials -->
+            <details>
+                <summary><span class="sec-color" style="background:#c0392b"></span> <span data-i18n="settings.security">Security</span></summary>
+                <div class="sec-body">
+                    <div class="fg">
+                        <label for="http_user" data-i18n="settings.security.user">Admin user (admin UI / OTA / WebSocket)</label>
+                        <input type="text" id="http_user" autocomplete="username" placeholder="admin">
+                    </div>
+                    <div class="fg">
+                        <label for="http_pass" data-i18n="settings.security.pass">New password (min. 4 chars)</label>
+                        <input type="password" id="http_pass" autocomplete="new-password"
+                               data-i18n-placeholder="settings.security.pass.placeholder"
+                               placeholder="Leave empty to keep current">
+                        <small data-i18n="settings.security.pass.hint">After change you will need the new password on next login.</small>
                     </div>
                 </div>
             </details>
 
             <!-- Performance -->
             <details>
-                <summary><span class="sec-color" style="background:var(--accent)"></span> Vykon</summary>
+                <summary><span class="sec-color" style="background:var(--accent)"></span> <span data-i18n="settings.perf">Performance</span></summary>
                 <div class="sec-body">
                     <div class="fg">
-                        <label>FPS pri streamovani</label>
+                        <label for="active_fps" data-i18n="settings.perf.active_fps">FPS while streaming</label>
                         <div class="range-wrap">
                             <input type="range" id="active_fps" min="1" max="30" value="15" step="1">
                             <span class="range-badge" id="active_fps-val">15</span>
                         </div>
                     </div>
                     <div class="fg">
-                        <label>FPS v klidovem rezimu</label>
+                        <label for="idle_fps" data-i18n="settings.perf.idle_fps">Idle FPS</label>
                         <div class="range-wrap">
                             <input type="range" id="idle_fps" min="1" max="10" value="1" step="1">
                             <span class="range-badge" id="idle_fps-val">1</span>
                         </div>
-                        <small>Nizsi = mensi spotreba, pomala detekce</small>
+                        <small data-i18n="settings.perf.idle_fps.hint">Lower = less power, slower detection</small>
                     </div>
                 </div>
             </details>
@@ -374,17 +471,21 @@
     <!-- Save bar -->
     <div class="save-bar">
         <div class="save-bar-inner">
-            <a href="/" class="btn btn-outline">Zpet</a>
-            <button type="button" class="btn btn-primary btn-block" onclick="saveSettings()">Ulozit nastaveni</button>
+            <a href="/" class="btn btn-outline" data-i18n="nav.back">Back</a>
+            <button type="button" id="save-btn" class="btn btn-primary btn-block" onclick="saveSettings()" data-i18n="common.save">Save settings</button>
         </div>
     </div>
 
     <div id="toast" class="toast"></div>
 
     <script>
+    // T() and showToast() come from common.js.
+
     // Slider value display
     const sliders = ['brightness','contrast','saturation','sharpness','denoise','ae_level',
-                     'aec_value','agc_gain','motion_threshold','motion_max_area','telegram_cooldown','active_fps','idle_fps'];
+                     'aec_value','agc_gain','motion_threshold','motion_min_area','motion_max_area',
+                     'person_detect_confidence','person_confident_threshold',
+                     'telegram_cooldown','active_fps','idle_fps'];
     sliders.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('input', () => {
@@ -393,7 +494,6 @@
         });
     });
 
-    // Show/hide manual exposure/gain
     document.getElementById('aec').addEventListener('change', function() {
         document.getElementById('aec_manual_group').style.display = this.checked ? 'none' : 'block';
     });
@@ -401,8 +501,17 @@
         document.getElementById('agc_manual_group').style.display = this.checked ? 'none' : 'block';
     });
 
+    // Until the device's current values are in the form, saving would push the
+    // HTML defaults (QVGA, quality 12, ...) onto the camera. Block it and say so.
+    let settingsLoaded = false;
+    const saveBtn = document.getElementById('save-btn');
+    if (saveBtn) saveBtn.disabled = true;
+
     // Load current settings
-    fetch('/api/status').then(r => r.json()).then(d => {
+    fetch('/api/status').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         const setVal = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
         const setChk = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.checked = !!val; };
         const updBadge = (id) => { const b = document.getElementById(id+'-val'); const e = document.getElementById(id); if (b&&e) b.textContent = e.value; };
@@ -431,11 +540,23 @@
         setChk('motion_enabled', d.motion_enabled);
         setVal('motion_threshold', d.motion_threshold); updBadge('motion_threshold');
         setVal('motion_cooldown', d.motion_cooldown || 10);
-        setVal('motion_max_area', d.motion_max_area || 70); updBadge('motion_max_area');
+        setVal('motion_max_area', d.motion_max_area || 50); updBadge('motion_max_area');
         setChk('motion_temporal_filter', d.motion_temporal_filter !== false);
         setChk('motion_spatial_filter', d.motion_spatial_filter !== false);
         setChk('motion_night_suppress', d.motion_night_suppress !== false);
         setChk('motion_save_sd', d.motion_save_sd);
+        setVal('motion_min_area', d.motion_min_area || 5); updBadge('motion_min_area');
+        setChk('person_detect_enabled', d.person_detect_enabled);
+        // Confidence is stored 0..1 but presented as a percentage slider.
+        setVal('person_detect_confidence', Math.round((d.person_detect_confidence || 0.6) * 100));
+        updBadge('person_detect_confidence');
+        setVal('person_confident_threshold', Math.round((d.person_confident_threshold || 0.75) * 100));
+        updBadge('person_confident_threshold');
+        setVal('person_detect_temporal', d.person_detect_temporal || 2);
+        setVal('person_detect_cooldown', d.person_detect_cooldown != null ? d.person_detect_cooldown : 10);
+        setChk('person_detect_save_sd', d.person_detect_save_sd);
+        setChk('telegram_notify_on_person', d.telegram_notify_on_person !== false);
+        setChk('telegram_photo_on_person', d.telegram_photo_on_person !== false);
         setChk('face_detect_enabled', d.face_detect_enabled);
         setChk('face_detect_two_stage', d.face_detect_two_stage !== false);
         setVal('face_detect_cooldown', d.face_detect_cooldown || 5);
@@ -453,14 +574,24 @@
         setVal('telegram_active_end', d.telegram_active_end != null ? d.telegram_active_end : 23);
         setChk('mqtt_enabled', d.mqtt_enabled);
         setVal('mqtt_server', d.mqtt_server || '');
-        setVal('mqtt_port', d.mqtt_port);
+        setVal('mqtt_port', d.mqtt_port || 1883);
         setVal('mqtt_topic_prefix', d.mqtt_topic_prefix || 'cams3');
-        setVal('active_fps', d.active_fps || 15); updBadge('active_fps');
-        setVal('idle_fps', d.idle_fps || 1); updBadge('idle_fps');
+        setVal('mqtt_user', d.mqtt_user || '');
+        setChk('mqtt_tls_enabled', d.mqtt_tls_enabled);
+        const mps = document.getElementById('mqtt_pass_status');
+        if (mps) mps.textContent = d.mqtt_pass_set ? T('settings.stored') : '';
+        const tgs = document.getElementById('telegram_token_status');
+        if (tgs) tgs.textContent = d.telegram_token_set ? T('settings.stored') : '';
+        setVal('active_fps', d.active_fps); updBadge('active_fps');
+        setVal('idle_fps', d.idle_fps); updBadge('idle_fps');
 
-        // Show manual groups if auto is off
         if (!d.aec) document.getElementById('aec_manual_group').style.display = 'block';
         if (!d.agc) document.getElementById('agc_manual_group').style.display = 'block';
+
+        settingsLoaded = true;
+        if (saveBtn) saveBtn.disabled = false;
+    }).catch(() => {
+        showToast(T('settings.loadfailed'), 'error');
     });
 
     function saveSettings() {
@@ -498,6 +629,15 @@
             motion_spatial_filter: getChk('motion_spatial_filter'),
             motion_night_suppress: getChk('motion_night_suppress'),
             motion_save_sd: getChk('motion_save_sd'),
+            motion_min_area: getVal('motion_min_area'),
+            person_detect_enabled: getChk('person_detect_enabled'),
+            person_detect_confidence: getVal('person_detect_confidence') / 100,
+            person_confident_threshold: getVal('person_confident_threshold') / 100,
+            person_detect_temporal: getVal('person_detect_temporal'),
+            person_detect_cooldown: getVal('person_detect_cooldown'),
+            person_detect_save_sd: getChk('person_detect_save_sd'),
+            telegram_notify_on_person: getChk('telegram_notify_on_person'),
+            telegram_photo_on_person: getChk('telegram_photo_on_person'),
             face_detect_enabled: getChk('face_detect_enabled'),
             face_detect_two_stage: getChk('face_detect_two_stage'),
             face_detect_cooldown: getVal('face_detect_cooldown'),
@@ -506,8 +646,6 @@
             timelapse_interval: getVal('timelapse_interval'),
             timelapse_save_sd: getChk('timelapse_save_sd'),
             telegram_enabled: getChk('telegram_enabled'),
-            telegram_bot_token: getStr('telegram_bot_token'),
-            telegram_chat_id: getStr('telegram_chat_id'),
             telegram_notify_on_motion: getChk('telegram_notify_on_motion'),
             telegram_photo_on_motion: getChk('telegram_photo_on_motion'),
             telegram_notify_on_face: getChk('telegram_notify_on_face'),
@@ -516,29 +654,47 @@
             telegram_active_start: getVal('telegram_active_start'),
             telegram_active_end: getVal('telegram_active_end'),
             mqtt_enabled: getChk('mqtt_enabled'),
-            mqtt_server: getStr('mqtt_server'),
             mqtt_port: getVal('mqtt_port'),
             mqtt_topic_prefix: getStr('mqtt_topic_prefix'),
+            mqtt_tls_enabled: getChk('mqtt_tls_enabled'),
             active_fps: getVal('active_fps'),
             idle_fps: getVal('idle_fps')
         };
 
-        fetch('/api/settings', {
+        // Fields where empty means "leave unchanged" rather than "erase".
+        // Sending an empty bot token on every save used to wipe the Telegram
+        // credentials whenever an unrelated slider was touched.
+        [['http_user','http_user'], ['http_pass','http_pass'],
+         ['telegram_bot_token','telegram_bot_token'], ['telegram_chat_id','telegram_chat_id'],
+         ['mqtt_server','mqtt_server'], ['mqtt_user','mqtt_user'], ['mqtt_pass','mqtt_pass']
+        ].forEach(([id, key]) => {
+            const el = document.getElementById(id);
+            if (el && el.value) data[key] = el.value;
+        });
+
+        // Drop anything that did not parse (empty number input -> NaN -> null),
+        // so a blank field can never be posted as a value.
+        Object.keys(data).forEach(k => {
+            if (typeof data[k] === 'number' && !Number.isFinite(data[k])) delete data[k];
+        });
+
+        if (!settingsLoaded) {
+            showToast(T('settings.notloaded'), 'error');
+            return;
+        }
+
+        apiFetch('/api/settings', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         })
         .then(r => r.json())
-        .then(result => showToast(result.message || 'Ulozeno!', result.success ? 'success' : 'error'))
-        .catch(err => showToast('Chyba: ' + err, 'error'));
+        .then(result => {
+            showToast(result.message || 'Saved', result.success ? 'success' : 'error');
+        })
+        .catch(() => showToast('Error', 'error'));
     }
 
-    function showToast(text, type) {
-        const t = document.getElementById('toast');
-        t.textContent = text;
-        t.className = 'toast ' + type + ' show';
-        setTimeout(() => t.className = 'toast', 3000);
-    }
     </script>
 </body>
 </html>

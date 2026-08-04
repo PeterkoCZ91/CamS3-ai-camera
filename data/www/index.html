@@ -1,37 +1,52 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>CamS3 5MP</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
+    <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
+         that the inline script below relies on. i18n.js stays deferred. -->
+    <script src="/common.js"></script>
+    <script src="/i18n.js" defer></script>
 </head>
 <body>
     <div class="page">
+        <!-- Default-password warning (shown while http_pass == "admin") -->
+        <div id="default-pw-banner" style="display:none;background:#c0392b;color:#fff;padding:12px 16px;
+             border-radius:8px;margin-bottom:16px;font-size:.92em;line-height:1.4">
+            <strong>!</strong>
+            <span data-i18n="index.banner.defaultpw">Warning: device still uses the default password</span>
+            <code style="background:rgba(0,0,0,.25);padding:1px 6px;border-radius:4px">admin / admin</code>.
+            <a href="/settings.html" style="color:#fff;text-decoration:underline;font-weight:600"
+               data-i18n="index.banner.defaultpw.action">Change it in Settings.</a>
+        </div>
+
         <div class="pg-header" style="text-align:center;display:block;margin-bottom:20px">
-            <h1 style="font-size:1.6em;letter-spacing:-.02em">CamS3 5MP Kamera</h1>
+            <h1 style="font-size:1.6em;letter-spacing:-.02em" data-i18n="index.title">CamS3 5MP Camera</h1>
             <div class="status-badge" style="margin-top:8px">
                 <span class="status-dot" id="status-dot"></span>
-                <span id="status-text">Pripojuji...</span>
+                <span id="status-text" data-i18n="common.connecting">Connecting...</span>
             </div>
         </div>
 
-        <!-- Navigation -->
-        <div class="nav-tabs">
-            <a href="/" class="nav-tab active">Prehled</a>
-            <a href="/settings.html" class="nav-tab">Nastaveni</a>
-            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
-            <a href="/admin.html" class="nav-tab">Admin</a>
-            <a href="/gallery.html" class="nav-tab">Galerie</a>
-        </div>
+        <!-- Navigation (same markup on every page; only `active` moves) -->
+        <nav class="nav-tabs" aria-label="Main" data-i18n-aria-label="aria.nav">
+            <a href="/"              class="nav-tab active" aria-current="page" data-i18n="nav.overview">Overview</a>
+            <a href="/settings.html" class="nav-tab"        data-i18n="nav.settings">Settings</a>
+            <a href="/zones.html"    class="nav-tab"        data-i18n="nav.zones">Zones</a>
+            <a href="/wifi.html"     class="nav-tab"        data-i18n="nav.wifi">Wi-Fi</a>
+            <a href="/admin.html"    class="nav-tab"        data-i18n="nav.admin">Admin</a>
+            <a href="/gallery.html"  class="nav-tab"        data-i18n="nav.gallery">Gallery</a>
+        </nav>
 
         <!-- Live Stream -->
         <div class="stream-container" id="stream-box">
-            <img id="stream-img" src="" alt="Live stream" style="display:none">
+            <img id="stream-img" src="" alt="Live stream" data-i18n-alt="index.stream.alt" style="display:none">
             <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)" id="stream-placeholder">
                 <div style="text-align:center">
                     <div style="font-size:2em;margin-bottom:8px">&#128247;</div>
-                    <div>Klikni pro spusteni streamu</div>
+                    <div data-i18n="index.stream.placeholder">Click to start stream</div>
                 </div>
             </div>
             <div class="stream-overlay">
@@ -42,82 +57,98 @@
 
         <!-- Stream controls -->
         <div style="display:flex;gap:10px;margin-bottom:20px">
-            <button class="btn btn-primary btn-block" id="btn-stream" onclick="toggleStream()">
-                Spustit stream
-            </button>
-            <a href="/api/snapshot" class="btn btn-outline" target="_blank" style="flex-shrink:0">
-                Snapshot
-            </a>
+            <button class="btn btn-primary btn-block" id="btn-stream" onclick="toggleStream()"
+                    data-i18n="index.stream.start">Start stream</button>
+            <a href="/api/snapshot" class="btn btn-outline" target="_blank" style="flex-shrink:0"
+               data-i18n="index.snapshot">Snapshot</a>
         </div>
 
         <!-- Info Grid -->
         <div class="info-grid" id="info">
             <div class="info-card">
-                <div class="label">IP adresa</div>
+                <div class="label" data-i18n="index.info.ip">IP address</div>
                 <div class="value" id="ip">...</div>
             </div>
             <div class="info-card">
-                <div class="label">Uptime</div>
+                <div class="label" data-i18n="index.info.uptime">Uptime</div>
                 <div class="value" id="uptime">--</div>
             </div>
             <div class="info-card">
-                <div class="label">RAM</div>
+                <div class="label" data-i18n="index.info.heap">Free heap</div>
                 <div class="value" id="heap">--</div>
             </div>
             <div class="info-card">
-                <div class="label">PSRAM</div>
+                <div class="label" data-i18n="index.info.psram">Free PSRAM</div>
                 <div class="value" id="psram">--</div>
             </div>
             <div class="info-card">
-                <div class="label">FPS</div>
+                <div class="label" data-i18n="index.info.fps">Capture FPS</div>
                 <div class="value" id="fps">--</div>
             </div>
             <div class="info-card">
-                <div class="label">Wi-Fi</div>
+                <div class="label" data-i18n="index.info.rssi">Wi-Fi</div>
                 <div class="value" id="rssi">--</div>
             </div>
             <div class="info-card">
-                <div class="label">Firmware</div>
+                <div class="label" data-i18n="index.info.temp">Temperature</div>
+                <div class="value" id="chip-temp">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label" data-i18n="index.info.profile">Profile</div>
+                <div class="value" id="profile">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label" data-i18n="index.info.sd">SD card</div>
+                <div class="value" id="sd-status">--</div>
+            </div>
+            <div class="info-card">
+                <div class="label" data-i18n="index.info.version">Firmware</div>
                 <div class="value" id="version">--</div>
             </div>
             <div class="info-card">
-                <div class="label">Klienti</div>
+                <div class="label" data-i18n="index.info.clients">Stream clients</div>
                 <div class="value" id="clients">--</div>
             </div>
             <div class="info-card" id="card-motion">
-                <div class="label">Pohyb</div>
+                <div class="label" data-i18n="settings.motion">Motion detection</div>
                 <div class="value" id="motion-status">--</div>
             </div>
             <div class="info-card" id="card-face">
-                <div class="label">Obliceje</div>
+                <div class="label" data-i18n="settings.face">Face detection</div>
                 <div class="value" id="face-status">--</div>
             </div>
+            <div class="info-card" id="card-person">
+                <div class="label" data-i18n="settings.person">Person detection</div>
+                <div class="value" id="person-status">--</div>
+            </div>
             <div class="info-card" id="card-telegram">
-                <div class="label">Telegram</div>
+                <div class="label" data-i18n="settings.telegram">Telegram</div>
                 <div class="value" id="telegram-status">--</div>
+            </div>
+            <div class="info-card" id="card-mqtt">
+                <div class="label" data-i18n="settings.mqtt">MQTT</div>
+                <div class="value" id="mqtt-status">--</div>
             </div>
         </div>
 
         <!-- Quick controls -->
         <div class="controls">
-            <button class="ctrl-btn" id="btn-motion" onclick="toggleMotion()">
-                Detekce pohybu: --
-            </button>
-            <button class="ctrl-btn" id="btn-timelapse" onclick="toggleTimelapse()">
-                Timelapse: --
-            </button>
-            <button class="ctrl-btn" id="btn-face" onclick="toggleFaceDetect()">
-                Obliceje: --
-            </button>
-            <button class="ctrl-btn" id="btn-telegram" onclick="toggleTelegram()">
-                Telegram: --
-            </button>
-            <button class="ctrl-btn" id="btn-led" onclick="toggleLed()">
-                LED: --
-            </button>
-            <a href="/api/status" class="ctrl-btn" target="_blank">
-                Stav JSON
-            </a>
+            <button class="ctrl-btn" id="btn-motion"    onclick="toggleMotion()">--</button>
+            <button class="ctrl-btn" id="btn-timelapse" onclick="toggleTimelapse()">--</button>
+            <button class="ctrl-btn" id="btn-face"      onclick="toggleFaceDetect()">--</button>
+            <button class="ctrl-btn" id="btn-person"    onclick="togglePersonDetect()">--</button>
+            <button class="ctrl-btn" id="btn-telegram"  onclick="toggleTelegram()">--</button>
+            <button class="ctrl-btn" id="btn-led"       onclick="toggleLed()">--</button>
+            <a href="/status"         class="ctrl-btn" target="_blank" data-i18n="index.tools.status">Status JSON</a>
+            <a href="/health"         class="ctrl-btn" target="_blank" data-i18n="index.tools.health">Health</a>
+            <a href="/events"         class="ctrl-btn" target="_blank" data-i18n="index.tools.events">Events</a>
+            <a href="/telemetry"      class="ctrl-btn" target="_blank" data-i18n="index.tools.telemetry">Telemetry</a>
+            <a href="/stream-stats"   class="ctrl-btn" target="_blank" data-i18n="index.tools.stream_stats">Stream Stats</a>
+            <a href="/psram-stats"    class="ctrl-btn" target="_blank" data-i18n="index.tools.psram_stats">PSRAM Stats</a>
+            <a href="/sd-list"        class="ctrl-btn" target="_blank" data-i18n="index.tools.sd_files">SD files</a>
+            <a href="/frame"          class="ctrl-btn" target="_blank" data-i18n="index.snapshot">Snapshot</a>
+            <a href="/log-viewer"     class="ctrl-btn" target="_blank" data-i18n="index.tools.log">Live Log</a>
+            <a href="/motion-debug"   class="ctrl-btn" target="_blank" data-i18n="index.tools.motion_debug">Motion debug</a>
         </div>
     </div>
 
@@ -125,67 +156,111 @@
     <div id="toast" class="toast"></div>
 
     <script>
+    // T() and showToast() come from common.js.
     let ws = null;
     let streaming = false;
     let streamUrl = '';
 
     function init() {
+        // Fallback only — updateUI() replaces this with stream_url from the device,
+        // which is what works behind a reverse proxy or on a non-default port.
         streamUrl = location.protocol + '//' + location.hostname + ':81/stream';
         connectWebSocket();
         fetchStatus();
+        statusPollTick();
+
+        const img = document.getElementById('stream-img');
+        if (img) img.onerror = function() {
+            if (!streaming) return;
+            showToast(T('index.stream.error'), 'error');
+            toggleStream();   // reset the button instead of leaving a blank frame
+        };
 
         document.getElementById('stream-box').addEventListener('click', function(e) {
             if (!streaming && e.target.id !== 'btn-stream') toggleStream();
         });
+
+        // Re-render dynamic labels on language change.
+        window.addEventListener('i18n:change', () => fetchStatus());
     }
 
     function connectWebSocket() {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(proto + '//' + location.host + '/ws');
         ws.onopen = function() {
-            document.getElementById('status-text').textContent = 'Online';
+            document.getElementById('status-text').textContent = T('common.online');
             document.getElementById('status-dot').className = 'status-dot';
         };
         ws.onmessage = function(e) {
             try { updateUI(JSON.parse(e.data)); } catch(err) {}
         };
         ws.onclose = function() {
-            document.getElementById('status-text').textContent = 'Odpojeno';
+            document.getElementById('status-text').textContent = T('common.offline');
             document.getElementById('status-dot').className = 'status-dot error';
             setTimeout(connectWebSocket, 3000);
         };
     }
 
+    // The WebSocket already pushes status every 2s, and every status build touches
+    // SD.usedBytes() + temperatureRead() on the device. So poll only as a fallback:
+    // when the socket is down, and never while the tab is hidden.
     function fetchStatus() {
         fetch('/api/status')
             .then(r => r.json())
             .then(updateUI)
             .catch(() => {});
-        setTimeout(fetchStatus, 5000);
+    }
+
+    function statusPollTick() {
+        const wsLive = ws && ws.readyState === WebSocket.OPEN;
+        if (!wsLive && document.visibilityState === 'visible') fetchStatus();
+        setTimeout(statusPollTick, 5000);
     }
 
     function updateUI(d) {
+        const banner = document.getElementById('default-pw-banner');
+        if (banner) banner.style.display = d.default_password ? 'block' : 'none';
+
+        // Motion / face / telegram tiles use short dynamic strings.
+        // These short dynamic labels go through the translation table like everything
+        // else. Branching on I18N.lang here meant the strings lived outside i18n.js,
+        // so they could never be reviewed with the rest of the translation and a third
+        // language would silently fall back to English.
+        const onLabel  = T('state.on');
+        const offLabel = T('state.off');
+
+        // Prefer the URLs the device reports — they stay correct behind a proxy.
+        if (d.stream_url && !streaming) streamUrl = d.stream_url;
+
         setText('ip', d.ip);
         setText('uptime', d.uptime);
-        setText('heap', Math.floor(d.free_heap/1024) + ' KB');
-        setText('psram', Math.floor(d.free_psram/1024/1024) + ' MB');
+        setText('heap', d.free_heap != null ? Math.floor(d.free_heap/1024) + ' KB' : '--');
+        setText('psram', d.free_psram != null ? Math.floor(d.free_psram/1024/1024) + ' MB' : '--');
         setText('fps', d.capture_fps ? d.capture_fps.toFixed(1) : '--');
         setText('rssi', d.rssi ? d.rssi + ' dBm' : 'AP');
         setText('version', d.version);
         setText('clients', d.stream_clients || '0');
+        setText('chip-temp', d.chip_temp_c != null ? Math.round(d.chip_temp_c) + ' C' : '--');
+        const profileKey = d.camera_profile ? 'index.profile.' + String(d.camera_profile).toLowerCase() : '';
+        setText('profile', profileKey ? T(profileKey) : '--');
+        setText('sd-status', d.sd_mounted ? ((d.sd_used_mb || 0) + '/' + (d.sd_total_mb || 0) + ' MB') : offLabel);
         setText('fps-badge', (d.capture_fps ? d.capture_fps.toFixed(1) : '--') + ' FPS');
 
-        // Resolution label
-        const resMap = {5:'QVGA',8:'VGA',9:'SVGA',10:'XGA',12:'SXGA',13:'UXGA'};
+        const resMap = {5:'QVGA',6:'CIF',8:'VGA',9:'SVGA',10:'XGA',11:'HD',12:'SXGA',
+                        13:'UXGA',14:'FHD',17:'QXGA',18:'QHD',22:'QSXGA'};
         setText('res-badge', resMap[d.frame_size] || d.frame_size);
+        const detected = T('state.detected');
+        const idle     = T('state.idle');
+        const noneStr  = T('state.none');
+        const conn     = T('state.connected');
+        const disc     = T('state.disconnected');
 
-        // Motion/face status cards
         var motionCard = document.getElementById('card-motion');
         if (d.motion_detected) {
-            setText('motion-status', 'DETEKOVAN');
+            setText('motion-status', detected);
             if (motionCard) motionCard.style.borderColor = 'var(--green)';
         } else {
-            setText('motion-status', d.motion_enabled ? 'Klid' : 'VYP');
+            setText('motion-status', d.motion_enabled ? idle : offLabel);
             if (motionCard) motionCard.style.borderColor = '';
         }
 
@@ -194,26 +269,47 @@
             setText('face-status', d.face_count + 'x');
             if (faceCard) faceCard.style.borderColor = '#e11d48';
         } else {
-            setText('face-status', d.face_detect_enabled ? 'Zadny' : 'VYP');
+            setText('face-status', d.face_detect_enabled ? noneStr : offLabel);
             if (faceCard) faceCard.style.borderColor = '';
         }
 
-        // Telegram status card
+        var personCard = document.getElementById('card-person');
+        if (d.person_detected && d.person_count > 0) {
+            setText('person-status', d.person_count + 'x');
+            if (personCard) personCard.style.borderColor = '#a855f7';
+        } else {
+            setText('person-status', d.person_detect_enabled ? noneStr : offLabel);
+            if (personCard) personCard.style.borderColor = '';
+        }
+
         var tgCard = document.getElementById('card-telegram');
         if (d.telegram_enabled && d.telegram_connected) {
-            setText('telegram-status', 'Pripojeno');
+            setText('telegram-status', conn);
             if (tgCard) tgCard.style.borderColor = '#0088cc';
         } else {
-            setText('telegram-status', d.telegram_enabled ? 'Odpojeno' : 'VYP');
+            setText('telegram-status', d.telegram_enabled ? disc : offLabel);
             if (tgCard) tgCard.style.borderColor = '';
         }
 
-        // Toggle buttons
-        setToggle('btn-motion', 'Detekce pohybu', d.motion_enabled);
-        setToggle('btn-face', 'Obliceje', d.face_detect_enabled);
-        setToggle('btn-telegram', 'Telegram', d.telegram_enabled);
-        setToggle('btn-timelapse', 'Timelapse', d.timelapse_enabled);
-        setToggle('btn-led', 'LED', d.led_enabled);
+        var mqttCard = document.getElementById('card-mqtt');
+        if (d.mqtt_enabled && d.mqtt_connected) {
+            setText('mqtt-status', conn);
+            if (mqttCard) mqttCard.style.borderColor = 'var(--accent)';
+        } else {
+            setText('mqtt-status', d.mqtt_enabled ? disc : offLabel);
+            if (mqttCard) mqttCard.style.borderColor = '';
+        }
+
+        setToggle('btn-motion',    T('settings.motion'),    d.motion_enabled,         onLabel, offLabel);
+        setToggle('btn-face',      T('settings.face'),      d.face_detect_enabled,    onLabel, offLabel);
+        setToggle('btn-person',    T('settings.person'),    d.person_detect_enabled,  onLabel, offLabel);
+        setToggle('btn-telegram',  T('settings.telegram'),  d.telegram_enabled,       onLabel, offLabel);
+        setToggle('btn-timelapse', T('settings.timelapse'), d.timelapse_enabled,      onLabel, offLabel);
+        setToggle('btn-led',       'LED',                   d.led_enabled,            onLabel, offLabel);
+
+        // Stream button label follows streaming state; re-translated on lang change.
+        const btn = document.getElementById('btn-stream');
+        if (btn) btn.textContent = streaming ? T('index.stream.stop') : T('index.stream.start');
     }
 
     function setText(id, val) {
@@ -221,93 +317,62 @@
         if (el) el.textContent = val;
     }
 
-    function setToggle(id, label, val) {
+    function setToggle(id, label, val, onStr, offStr) {
         var el = document.getElementById(id);
         if (!el) return;
-        el.textContent = label + ': ' + (val ? 'ZAP' : 'VYP');
+        el.textContent = label + ': ' + (val ? onStr : offStr);
         el.className = 'ctrl-btn' + (val ? ' active' : '');
     }
 
     function toggleStream() {
         var img = document.getElementById('stream-img');
-        var ph = document.getElementById('stream-placeholder');
+        var ph  = document.getElementById('stream-placeholder');
         var btn = document.getElementById('btn-stream');
 
         if (streaming) {
             img.src = '';
             img.style.display = 'none';
             ph.style.display = 'flex';
-            btn.textContent = 'Spustit stream';
+            btn.textContent = T('index.stream.start');
             btn.className = 'btn btn-primary btn-block';
             streaming = false;
         } else {
             img.src = streamUrl;
             img.style.display = 'block';
             ph.style.display = 'none';
-            btn.textContent = 'Zastavit stream';
+            btn.textContent = T('index.stream.stop');
             btn.className = 'btn btn-danger btn-block';
             streaming = true;
         }
     }
 
-    function toggleMotion() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            return fetch('/api/settings', {
+    // Read-modify-write of one flag. Every step is checked and reported: these
+    // used to be bare promise chains, so a 401/403/timeout left the button silently
+    // showing the old state with no hint that nothing had happened.
+    function toggleFlag(key) {
+        return fetch('/api/status')
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(d => apiFetch('/api/settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({motion_enabled: !d.motion_enabled})
-            });
-        }).then(() => showToast('Nastaveni uplateno', 'success'));
+                body: JSON.stringify({[key]: !d[key]})
+            }))
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(res => {
+                if (res && res.success === false) throw new Error(res.message || 'failed');
+                fetchStatus();   // reflect the value the device actually holds
+            })
+            .catch(err => showToast(T('common.error') + ': ' + err.message, 'error'));
     }
 
-    function toggleTimelapse() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            return fetch('/api/settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({timelapse_enabled: !d.timelapse_enabled})
-            });
-        }).then(() => showToast('Nastaveni uplateno', 'success'));
-    }
+    function toggleMotion()        { toggleFlag('motion_enabled'); }
+    function toggleTimelapse()     { toggleFlag('timelapse_enabled'); }
+    function toggleFaceDetect()    { toggleFlag('face_detect_enabled'); }
+    function togglePersonDetect()  { toggleFlag('person_detect_enabled'); }
+    function toggleTelegram()      { toggleFlag('telegram_enabled'); }
+    function toggleLed()           { toggleFlag('led_enabled'); }
 
-    function toggleFaceDetect() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            return fetch('/api/settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({face_detect_enabled: !d.face_detect_enabled})
-            });
-        }).then(() => showToast('Nastaveni uplateno', 'success'));
-    }
-
-    function toggleTelegram() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            return fetch('/api/settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({telegram_enabled: !d.telegram_enabled})
-            });
-        }).then(() => showToast('Nastaveni uplateno', 'success'));
-    }
-
-    function toggleLed() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            return fetch('/api/settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({led_enabled: !d.led_enabled})
-            });
-        }).then(() => showToast('LED prepnuto', 'success'));
-    }
-
-    function showToast(text, type) {
-        var t = document.getElementById('toast');
-        t.textContent = text;
-        t.className = 'toast ' + type + ' show';
-        setTimeout(function() { t.className = 'toast'; }, 3000);
-    }
-
-    init();
+    window.addEventListener('load', init);
     </script>
 </body>
 </html>

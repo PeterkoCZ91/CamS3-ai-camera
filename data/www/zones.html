@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Zones - CamS3</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/style.css">
+    <script src="/common.js"></script>
+    <script src="/i18n.js" defer></script>
+    <style>
+        /* Editor canvas: the camera frame with the motion grid laid over it.
+           Percentage geometry (not SVG) so labels stay legible and the overlay
+           keeps matching the frame whatever aspect ratio the sensor produces. */
+        .editor-wrap {
+            position: relative;
+            background: #000;
+            border-radius: var(--radius);
+            overflow: hidden;
+            min-height: 200px;
+            margin-bottom: 10px;
+        }
+        .editor-wrap img { display: block; width: 100%; height: auto; }
+        .grid-overlay {
+            position: absolute; inset: 0;
+            display: grid;
+            touch-action: none;      /* dragging paints, it must not scroll the page */
+            cursor: crosshair;
+        }
+        .gcell {
+            border-right: 1px solid rgba(255,255,255,.08);
+            border-bottom: 1px solid rgba(255,255,255,.08);
+        }
+        .mode-roi .gcell.off { background: rgba(239,68,68,.45); }
+        .gcell.kbd { box-shadow: inset 0 0 0 2px var(--accent); }
+        .zone-layer { position: absolute; inset: 0; pointer-events: none; }
+        /* Fill comes from an inset box-shadow set in JS (translucent zone colour),
+           so the frame stays visible underneath. */
+        .zone-rect {
+            position: absolute;
+            border: 2px solid currentColor;
+            border-radius: 3px;
+        }
+        .zone-rect.dashed { border-style: dashed; }
+        .zone-rect .zlabel {
+            position: absolute; top: 0; left: 0;
+            font-size: .68em; line-height: 1.4;
+            padding: 0 4px;
+            background: rgba(0,0,0,.65);
+            color: #fff;
+            white-space: nowrap;
+            border-radius: 0 0 4px 0;
+        }
+        .draw-preview {
+            position: absolute;
+            border: 2px dashed var(--accent);
+            background: rgba(0,212,255,.18);
+        }
+        .mode-switch { display: flex; gap: 8px; margin-bottom: 12px; }
+        .mode-switch .ctrl-btn { flex: 1; }
+        .tool-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .counter-row {
+            display: flex; align-items: center; gap: 10px;
+            flex-wrap: wrap; margin-bottom: 12px; font-size: .85em;
+            color: var(--text-dim);
+        }
+        .hint { font-size: .8em; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5; }
+        .zone-row {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 0; border-bottom: 1px solid var(--border);
+        }
+        .zone-row:last-child { border-bottom: none; }
+        .zone-swatch {
+            width: 14px; height: 14px; border-radius: 4px;
+            flex-shrink: 0; border: 1px solid rgba(255,255,255,.25);
+        }
+        .zone-meta { flex: 1; min-width: 0; }
+        .zone-meta .n { font-size: .9em; color: #fff; overflow: hidden; text-overflow: ellipsis; }
+        .zone-meta .d { font-size: .75em; color: var(--text-muted); }
+        .rect-row {
+            display: flex; align-items: center; gap: 8px;
+            font-size: .8em; color: var(--text-dim);
+            padding: 6px 0; border-bottom: 1px solid var(--border);
+        }
+        .rect-row:last-child { border-bottom: none; }
+        .rect-row code { font-family: monospace; color: #fff; }
+        .rect-inputs { display: grid; grid-template-columns: repeat(4, 1fr) auto; gap: 6px; align-items: end; }
+        .rect-inputs label { font-size: .7em; color: var(--text-muted); display: block; margin-bottom: 2px; }
+        .badge-warn {
+            padding: 2px 8px; border-radius: 6px; font-size: .95em;
+            background: var(--yellow-bg); border: 1px solid var(--yellow);
+            color: var(--yellow);
+        }
+        @media (max-width: 600px) {
+            .rect-inputs { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="pg-header">
+            <h1 data-i18n="zones.title">Detection zones &amp; ROI</h1>
+            <a href="/" class="back-link" data-i18n="nav.back">Back</a>
+        </div>
+
+        <nav class="nav-tabs" aria-label="Main" data-i18n-aria-label="aria.nav">
+            <a href="/"              class="nav-tab"        data-i18n="nav.overview">Overview</a>
+            <a href="/settings.html" class="nav-tab"        data-i18n="nav.settings">Settings</a>
+            <a href="/zones.html"    class="nav-tab active" aria-current="page" data-i18n="nav.zones">Zones</a>
+            <a href="/wifi.html"     class="nav-tab"        data-i18n="nav.wifi">Wi-Fi</a>
+            <a href="/admin.html"    class="nav-tab"        data-i18n="nav.admin">Admin</a>
+            <a href="/gallery.html"  class="nav-tab"        data-i18n="nav.gallery">Gallery</a>
+        </nav>
+
+        <div class="hint" id="mode-label" style="margin-bottom:6px" data-i18n="zones.mode">Editor mode</div>
+        <div class="mode-switch" role="group" aria-labelledby="mode-label">
+            <button type="button" class="ctrl-btn primary" id="mode-roi"   aria-pressed="true"
+                    data-i18n="zones.tab.roi">ROI mask</button>
+            <button type="button" class="ctrl-btn"         id="mode-zones" aria-pressed="false"
+                    data-i18n="zones.tab.zones">Zones</button>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <div class="editor-wrap mode-roi" id="editor-wrap">
+                    <!-- No src= here on purpose: an empty src re-requests the page. -->
+                    <img id="bg-img" alt="">
+                    <div class="grid-overlay" id="grid-overlay" tabindex="0" role="group"
+                         aria-label="Motion grid" data-i18n-aria-label="aria.grid"></div>
+                    <div class="zone-layer" id="zone-layer"></div>
+                </div>
+
+                <div class="tool-row">
+                    <button type="button" class="btn btn-outline btn-sm" id="btn-refresh"
+                            data-i18n="zones.preview.refresh">Refresh snapshot</button>
+                    <label class="btn btn-outline btn-sm" for="chk-live" style="gap:8px">
+                        <input type="checkbox" id="chk-live">
+                        <span data-i18n="zones.preview.live">Live stream</span>
+                    </label>
+                </div>
+
+                <div class="counter-row">
+                    <span data-i18n="zones.grid.label">Motion grid</span>
+                    <strong id="grid-dims">--</strong>
+                    <span>&middot;</span>
+                    <span data-i18n="zones.roi.active">Active blocks</span>
+                    <strong id="active-count">--</strong>
+                    <span class="badge-warn" id="dirty-badge" style="display:none"
+                          data-i18n="zones.roi.unsaved">Unsaved changes</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ROI mask panel -->
+        <div class="card" id="panel-roi">
+            <div class="card-body">
+                <p class="hint" data-i18n="zones.roi.hint">
+                    Click or drag over the image to toggle blocks. Red = ignored by motion detection.
+                </p>
+                <div class="tool-row">
+                    <button type="button" class="btn btn-outline btn-sm" id="btn-all"    data-i18n="zones.roi.all">Select all</button>
+                    <button type="button" class="btn btn-outline btn-sm" id="btn-none"   data-i18n="zones.roi.none">Clear all</button>
+                    <button type="button" class="btn btn-outline btn-sm" id="btn-invert" data-i18n="zones.roi.invert">Invert</button>
+                </div>
+                <div class="tool-row">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-save-roi"  data-i18n="zones.roi.save">Save mask</button>
+                    <button type="button" class="btn btn-danger btn-sm"  id="btn-clear-roi" data-i18n="zones.roi.reset">Whole frame (no mask)</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Zones panel -->
+        <div class="card" id="panel-zones" style="display:none">
+            <div class="card-body">
+                <p class="hint" data-i18n="zones.zone.hint">
+                    Drag over the image to draw a rectangle for the zone being edited.
+                </p>
+
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                    <strong style="font-size:.9em;color:#fff" data-i18n="zones.zone.list">Saved zones</strong>
+                    <button type="button" class="btn btn-outline btn-sm" id="btn-new-zone"
+                            data-i18n="zones.zone.new">New zone</button>
+                </div>
+                <div id="zone-list"></div>
+
+                <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+
+                <div id="zone-form" style="display:none">
+                    <strong style="display:block;font-size:.9em;color:#fff;margin-bottom:10px"
+                            data-i18n="zones.zone.editing">Zone being edited</strong>
+                    <div class="fg">
+                        <label for="zone-name" data-i18n="zones.zone.name">Zone name (max 23 characters)</label>
+                        <input type="text" id="zone-name" maxlength="23" autocomplete="off">
+                    </div>
+                    <div class="fg">
+                        <label for="zone-color" data-i18n="zones.zone.color">Colour</label>
+                        <input type="color" id="zone-color" value="#00d4ff"
+                               style="width:64px;height:38px;padding:2px">
+                    </div>
+                    <div class="toggle-row">
+                        <label for="zone-alert" data-i18n="zones.zone.alert">Trigger an alert (event / Telegram)</label>
+                        <label class="toggle"><input type="checkbox" id="zone-alert"><span class="slider"></span></label>
+                    </div>
+
+                    <!-- Caption for a list, not for a control: a <label> here would
+                         have no form element to point at. -->
+                    <div class="fg" role="group" aria-labelledby="rects-cap">
+                        <span id="rects-cap" style="display:block;margin-bottom:5px;font-size:.82em;color:var(--text-dim);font-weight:500"
+                              data-i18n="zones.zone.rects">Rectangles</span>
+                        <div id="rect-list"></div>
+                        <small data-i18n="zones.zone.rects.hint">Up to 4 rectangles per zone, up to 8 zones per device.</small>
+                    </div>
+
+                    <div class="fg rect-inputs">
+                        <div>
+                            <label for="rect-x">X</label>
+                            <input type="number" id="rect-x" min="0" value="0">
+                        </div>
+                        <div>
+                            <label for="rect-y">Y</label>
+                            <input type="number" id="rect-y" min="0" value="0">
+                        </div>
+                        <div>
+                            <label for="rect-w">W</label>
+                            <input type="number" id="rect-w" min="1" value="4">
+                        </div>
+                        <div>
+                            <label for="rect-h">H</label>
+                            <input type="number" id="rect-h" min="1" value="4">
+                        </div>
+                        <button type="button" class="btn btn-outline btn-sm" id="btn-add-rect"
+                                data-i18n="zones.zone.add_rect">Add rectangle</button>
+                    </div>
+
+                    <div class="tool-row" style="margin-top:12px">
+                        <button type="button" class="btn btn-primary btn-sm" id="btn-save-zone"   data-i18n="zones.zone.save">Save zone</button>
+                        <button type="button" class="btn btn-outline btn-sm" id="btn-cancel-zone" data-i18n="zones.zone.cancel">Cancel editing</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+    (function () {
+        'use strict';
+
+        // Grid dimensions always come from /api/roi — never hardcode them, the
+        // firmware is free to change MOTION_GRID_W/H.
+        let gw = 0, gh = 0;
+        let mask = [];              // '0' = block ignored by motion detection
+        let dirty = false;
+        let zones = [];
+        let mode = 'roi';
+        let editing = null;         // {origName, name, color, alert, rects[]}
+        let streamUrl = '';
+        let cursor = { x: 0, y: 0 };
+
+        const wrap    = document.getElementById('editor-wrap');
+        const overlay = document.getElementById('grid-overlay');
+        const zlayer  = document.getElementById('zone-layer');
+        const img     = document.getElementById('bg-img');
+        let cells = [];
+        let preview = null;
+
+        const idx = (x, y) => y * gw + x;
+
+        // ── Preview image ────────────────────────────────────────────────────
+        function loadSnapshot() {
+            img.src = '/api/snapshot?ts=' + Date.now();
+        }
+        function setLive(on) {
+            if (on) {
+                img.src = streamUrl || (location.protocol + '//' + location.hostname + ':81/stream');
+            } else {
+                // Drop the attribute (not src='') to close the MJPEG connection
+                // without firing a bogus load error for the document URL.
+                img.removeAttribute('src');
+                loadSnapshot();
+            }
+        }
+        img.addEventListener('error', () => {
+            // Keep the grid usable even without a picture behind it.
+            wrap.style.minHeight = '260px';
+            showToast(T('zones.preview.failed'), 'error');
+        });
+
+        // ── Grid construction ────────────────────────────────────────────────
+        function buildCells() {
+            overlay.textContent = '';
+            overlay.style.gridTemplateColumns = 'repeat(' + gw + ', 1fr)';
+            overlay.style.gridTemplateRows    = 'repeat(' + gh + ', 1fr)';
+            cells = [];
+            for (let i = 0; i < gw * gh; i++) {
+                const c = document.createElement('div');
+                c.className = 'gcell';
+                overlay.appendChild(c);
+                cells.push(c);
+            }
+            document.getElementById('grid-dims').textContent = gw + ' x ' + gh;
+        }
+
+        function renderMask() {
+            let active = 0;
+            for (let i = 0; i < cells.length; i++) {
+                const on = mask[i] === '1';
+                if (on) active++;
+                cells[i].classList.toggle('off', !on);
+            }
+            document.getElementById('active-count').textContent = active + ' / ' + (gw * gh);
+            document.getElementById('dirty-badge').style.display = dirty ? '' : 'none';
+            renderCursor();
+        }
+
+        function renderCursor() {
+            cells.forEach(c => c.classList.remove('kbd'));
+            if (document.activeElement === overlay && cells.length) {
+                const c = cells[idx(cursor.x, cursor.y)];
+                if (c) c.classList.add('kbd');
+            }
+        }
+
+        function setBlock(x, y, val) {
+            const i = idx(x, y);
+            if (mask[i] === val) return;
+            mask[i] = val;
+            dirty = true;
+            renderMask();
+        }
+
+        // ── Pointer interaction (paint blocks / draw rectangles) ─────────────
+        function pointToBlock(e, clamp) {
+            const r = overlay.getBoundingClientRect();
+            if (!r.width || !r.height || !gw || !gh) return null;
+            let bx = Math.floor((e.clientX - r.left) / r.width  * gw);
+            let by = Math.floor((e.clientY - r.top)  / r.height * gh);
+            if (clamp) {
+                bx = Math.min(gw - 1, Math.max(0, bx));
+                by = Math.min(gh - 1, Math.max(0, by));
+            } else if (bx < 0 || by < 0 || bx >= gw || by >= gh) {
+                return null;
+            }
+            return { x: bx, y: by };
+        }
+
+        let dragging = false, paintTo = '1', rectStart = null;
+
+        overlay.addEventListener('pointerdown', e => {
+            const p = pointToBlock(e);
+            if (!p) return;
+            e.preventDefault();
+            overlay.focus();
+            cursor = p;
+            dragging = true;
+            try { overlay.setPointerCapture(e.pointerId); } catch (_) {}
+            if (mode === 'roi') {
+                paintTo = mask[idx(p.x, p.y)] === '1' ? '0' : '1';
+                setBlock(p.x, p.y, paintTo);
+            } else {
+                if (!editing) startNewZone();
+                rectStart = p;
+                showPreview(p, p);
+            }
+        });
+
+        overlay.addEventListener('pointermove', e => {
+            if (!dragging) return;
+            const p = pointToBlock(e, true);
+            if (!p) return;
+            cursor = p;
+            if (mode === 'roi') setBlock(p.x, p.y, paintTo);
+            else if (rectStart) showPreview(rectStart, p);
+        });
+
+        function endDrag(e) {
+            if (!dragging) return;
+            dragging = false;
+            try { overlay.releasePointerCapture(e.pointerId); } catch (_) {}
+            if (mode === 'zones' && rectStart) {
+                const p = pointToBlock(e, true) || rectStart;
+                addRect(normRect(rectStart, p));
+                rectStart = null;
+                hidePreview();
+            }
+        }
+        overlay.addEventListener('pointerup', endDrag);
+        overlay.addEventListener('pointercancel', endDrag);
+
+        // Keyboard path for the grid: the pointer interaction alone would leave the
+        // ROI editor unusable without a mouse.
+        overlay.addEventListener('keydown', e => {
+            const step = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+            if (step) {
+                cursor.x = Math.min(gw - 1, Math.max(0, cursor.x + step[0]));
+                cursor.y = Math.min(gh - 1, Math.max(0, cursor.y + step[1]));
+                renderCursor();
+                e.preventDefault();
+                return;
+            }
+            if ((e.key === ' ' || e.key === 'Enter') && mode === 'roi') {
+                setBlock(cursor.x, cursor.y, mask[idx(cursor.x, cursor.y)] === '1' ? '0' : '1');
+                e.preventDefault();
+            }
+        });
+        overlay.addEventListener('focus', renderCursor);
+        overlay.addEventListener('blur', () => cells.forEach(c => c.classList.remove('kbd')));
+
+        function normRect(a, b) {
+            const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+            return { x: x, y: y, w: Math.abs(a.x - b.x) + 1, h: Math.abs(a.y - b.y) + 1 };
+        }
+
+        function pctStyle(r) {
+            return {
+                left:   (r.x / gw * 100) + '%',
+                top:    (r.y / gh * 100) + '%',
+                width:  (r.w / gw * 100) + '%',
+                height: (r.h / gh * 100) + '%'
+            };
+        }
+
+        function showPreview(a, b) {
+            if (!preview) {
+                preview = document.createElement('div');
+                preview.className = 'draw-preview';
+                zlayer.appendChild(preview);
+            }
+            Object.assign(preview.style, pctStyle(normRect(a, b)));
+            preview.style.display = '';
+        }
+        function hidePreview() { if (preview) preview.style.display = 'none'; }
+
+        // ── Zone overlay rendering ──────────────────────────────────────────
+        function renderZoneLayer() {
+            zlayer.textContent = '';
+            preview = null;
+            if (mode !== 'zones') return;
+            const draw = (z, dashed) => {
+                (z.rects || []).forEach((r, i) => {
+                    const d = document.createElement('div');
+                    d.className = 'zone-rect' + (dashed ? ' dashed' : '');
+                    d.style.color = z.color || '#00d4ff';
+                    Object.assign(d.style, pctStyle(r));
+                    // currentColor fill would be opaque; keep the frame visible.
+                    d.style.backgroundColor = 'transparent';
+                    d.style.boxShadow = 'inset 0 0 0 999px ' + hexToRgba(z.color || '#00d4ff', .22);
+                    if (i === 0 && z.name) {
+                        const l = document.createElement('span');
+                        l.className = 'zlabel';
+                        l.textContent = (z.alert ? '! ' : '') + z.name;
+                        d.appendChild(l);
+                    }
+                    zlayer.appendChild(d);
+                });
+            };
+            zones.forEach(z => { if (!editing || z.name !== editing.origName) draw(z, false); });
+            if (editing) draw(editing, true);
+        }
+
+        function hexToRgba(hex, a) {
+            const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
+            if (!m) return 'rgba(0,212,255,' + a + ')';
+            const n = parseInt(m[1], 16);
+            return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+        }
+
+        // ── Zone list / form ────────────────────────────────────────────────
+        function renderZoneList() {
+            const host = document.getElementById('zone-list');
+            host.textContent = '';
+            if (!zones.length) {
+                const p = document.createElement('div');
+                p.className = 'hint';
+                p.style.margin = '0';
+                p.textContent = T('zones.zone.empty');
+                host.appendChild(p);
+                return;
+            }
+            zones.forEach(z => {
+                const row = document.createElement('div');
+                row.className = 'zone-row';
+
+                const sw = document.createElement('span');
+                sw.className = 'zone-swatch';
+                sw.style.background = z.color || '#00d4ff';
+                row.appendChild(sw);
+
+                const meta = document.createElement('div');
+                meta.className = 'zone-meta';
+                const n = document.createElement('div');
+                n.className = 'n';
+                n.textContent = z.name;
+                const d = document.createElement('div');
+                d.className = 'd';
+                d.textContent = (z.rects || []).length + ' ' + T('zones.zone.rects').toLowerCase() +
+                                (z.alert ? ' - ' + T('zones.zone.alert') : '');
+                meta.appendChild(n); meta.appendChild(d);
+                row.appendChild(meta);
+
+                const edit = document.createElement('button');
+                edit.type = 'button';
+                edit.className = 'btn btn-outline btn-sm';
+                edit.textContent = T('zones.zone.edit');
+                edit.addEventListener('click', () => startEdit(z));
+                row.appendChild(edit);
+
+                const del = document.createElement('button');
+                del.type = 'button';
+                del.className = 'btn btn-danger btn-sm';
+                del.textContent = T('common.delete');
+                del.addEventListener('click', () => deleteZone(z.name));
+                row.appendChild(del);
+
+                host.appendChild(row);
+            });
+        }
+
+        function renderRectList() {
+            const host = document.getElementById('rect-list');
+            host.textContent = '';
+            if (!editing) return;
+            if (!editing.rects.length) {
+                const p = document.createElement('div');
+                p.className = 'rect-row';
+                p.textContent = T('zones.zone.rects.empty');
+                host.appendChild(p);
+                return;
+            }
+            editing.rects.forEach((r, i) => {
+                const row = document.createElement('div');
+                row.className = 'rect-row';
+                const code = document.createElement('code');
+                code.textContent = 'x' + r.x + ' y' + r.y + '  ' + r.w + ' x ' + r.h;
+                row.appendChild(code);
+                const spacer = document.createElement('span');
+                spacer.style.flex = '1';
+                row.appendChild(spacer);
+                const rm = document.createElement('button');
+                rm.type = 'button';
+                rm.className = 'btn btn-outline btn-sm';
+                rm.textContent = '-';
+                rm.title = T('zones.zone.remove_rect');
+                rm.setAttribute('aria-label', T('zones.zone.remove_rect') + ' ' + (i + 1));
+                rm.addEventListener('click', () => {
+                    editing.rects.splice(i, 1);
+                    renderRectList();
+                    renderZoneLayer();
+                });
+                row.appendChild(rm);
+                host.appendChild(row);
+            });
+        }
+
+        function showForm(on) {
+            document.getElementById('zone-form').style.display = on ? '' : 'none';
+        }
+
+        function startNewZone() {
+            if (zones.length >= 8) { showToast(T('zones.zone.limit'), 'error'); return; }
+            editing = { origName: '', name: '', color: '#00d4ff', alert: false, rects: [] };
+            fillForm();
+        }
+
+        function startEdit(z) {
+            editing = {
+                origName: z.name,
+                name: z.name,
+                color: z.color || '#00d4ff',
+                alert: !!z.alert,
+                rects: (z.rects || []).map(r => ({ x: r.x, y: r.y, w: r.w, h: r.h }))
+            };
+            fillForm();
+        }
+
+        function fillForm() {
+            showForm(true);
+            document.getElementById('zone-name').value  = editing.name;
+            document.getElementById('zone-color').value = /^#[0-9a-f]{6}$/i.test(editing.color) ? editing.color : '#00d4ff';
+            document.getElementById('zone-alert').checked = editing.alert;
+            renderRectList();
+            renderZoneLayer();
+            document.getElementById('zone-name').focus();
+        }
+
+        function readForm() {
+            editing.name  = document.getElementById('zone-name').value.trim().slice(0, 23);
+            editing.color = document.getElementById('zone-color').value;
+            editing.alert = document.getElementById('zone-alert').checked;
+        }
+
+        function addRect(r) {
+            if (!editing) return;
+            if (editing.rects.length >= 4) { showToast(T('zones.zone.rectlimit'), 'error'); return; }
+            r.x = Math.min(gw - 1, Math.max(0, r.x | 0));
+            r.y = Math.min(gh - 1, Math.max(0, r.y | 0));
+            r.w = Math.min(gw - r.x, Math.max(1, r.w | 0));
+            r.h = Math.min(gh - r.y, Math.max(1, r.h | 0));
+            editing.rects.push(r);
+            renderRectList();
+            renderZoneLayer();
+        }
+
+        // ── API ─────────────────────────────────────────────────────────────
+        function jsonOrThrow(r) {
+            return r.json().catch(() => ({})).then(j => {
+                if (!r.ok) throw new Error(j.error || j.message || ('HTTP ' + r.status));
+                return j;
+            });
+        }
+
+        function loadRoi() {
+            return fetch('/api/roi', { credentials: 'same-origin' })
+                .then(jsonOrThrow)
+                .then(d => {
+                    const w = parseInt(d.grid_w, 10), h = parseInt(d.grid_h, 10);
+                    if (w > 0 && h > 0 && (w !== gw || h !== gh)) { gw = w; gh = h; buildCells(); }
+                    const m = typeof d.mask === 'string' ? d.mask : '';
+                    // A stored mask of the wrong length is not applied by the firmware
+                    // either, so present the frame as fully active instead of guessing.
+                    mask = (m.length === gw * gh) ? m.split('') : new Array(gw * gh).fill('1');
+                    dirty = false;
+                    renderMask();
+                })
+                .catch(e => showToast(T('zones.roi.loadfailed') + ': ' + e.message, 'error'));
+        }
+
+        function saveRoi(clear) {
+            const body = JSON.stringify({ mask: clear ? '' : mask.join('') });
+            return apiFetch('/api/roi', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body
+            })
+                .then(jsonOrThrow)
+                .then(() => {
+                    showToast(clear ? T('zones.roi.cleared') : T('zones.roi.saved'), 'success');
+                    return loadRoi();
+                })
+                .catch(e => showToast(T('zones.roi.savefailed') + ': ' + e.message, 'error'));
+        }
+
+        function loadZones() {
+            return fetch('/api/zones', { credentials: 'same-origin' })
+                .then(jsonOrThrow)
+                .then(list => {
+                    zones = Array.isArray(list) ? list : [];
+                    renderZoneList();
+                    renderZoneLayer();
+                })
+                .catch(e => showToast(T('zones.zone.loadfailed') + ': ' + e.message, 'error'));
+        }
+
+        function saveZone() {
+            if (!editing) return;
+            readForm();
+            if (!editing.name) { showToast(T('zones.zone.name.required'), 'error'); return; }
+            if (!editing.rects.length) { showToast(T('zones.zone.rect.required'), 'error'); return; }
+            const isNew = !zones.some(z => z.name === editing.name);
+            if (isNew && zones.length >= 8) { showToast(T('zones.zone.limit'), 'error'); return; }
+
+            const payload = {
+                name: editing.name,
+                color: editing.color,
+                alert: editing.alert,
+                rects: editing.rects.slice(0, 4)
+            };
+            // Renaming means the old entry has to go, otherwise both would exist and
+            // the 8-zone budget would silently fill up.
+            const renamed = editing.origName && editing.origName !== editing.name ? editing.origName : null;
+
+            apiFetch('/api/zones', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(jsonOrThrow)
+                .then(() => renamed
+                    ? apiFetch('/api/zones?name=' + encodeURIComponent(renamed), { method: 'DELETE' })
+                        .then(() => null).catch(() => null)
+                    : null)
+                .then(() => {
+                    showToast(T('zones.zone.saved'), 'success');
+                    editing = null;
+                    showForm(false);
+                    return loadZones();
+                })
+                .catch(e => showToast(T('zones.zone.savefailed') + ': ' + e.message, 'error'));
+        }
+
+        function deleteZone(name) {
+            if (!confirm(T('zones.zone.delete.confirm') + ': ' + name)) return;
+            apiFetch('/api/zones?name=' + encodeURIComponent(name), { method: 'DELETE' })
+                .then(jsonOrThrow)
+                .then(() => {
+                    showToast(T('zones.zone.deleted'), 'success');
+                    if (editing && editing.origName === name) { editing = null; showForm(false); }
+                    return loadZones();
+                })
+                .catch(e => showToast(T('zones.zone.deletefailed') + ': ' + e.message, 'error'));
+        }
+
+        // ── Mode switching ──────────────────────────────────────────────────
+        function setMode(m) {
+            mode = m;
+            const roi = m === 'roi';
+            wrap.classList.toggle('mode-roi', roi);
+            document.getElementById('panel-roi').style.display   = roi ? '' : 'none';
+            document.getElementById('panel-zones').style.display = roi ? 'none' : '';
+            const br = document.getElementById('mode-roi'), bz = document.getElementById('mode-zones');
+            br.className = 'ctrl-btn' + (roi ? ' primary' : '');
+            bz.className = 'ctrl-btn' + (roi ? '' : ' primary');
+            br.setAttribute('aria-pressed', String(roi));
+            bz.setAttribute('aria-pressed', String(!roi));
+            overlay.setAttribute('aria-label',
+                (roi ? T('zones.tab.roi') : T('zones.tab.zones')) + ' - ' + T('zones.grid.label'));
+            renderMask();
+            renderZoneLayer();
+        }
+
+        // ── Wiring ──────────────────────────────────────────────────────────
+        document.getElementById('mode-roi').addEventListener('click', () => setMode('roi'));
+        document.getElementById('mode-zones').addEventListener('click', () => setMode('zones'));
+        document.getElementById('btn-refresh').addEventListener('click', () => {
+            document.getElementById('chk-live').checked = false;
+            loadSnapshot();
+        });
+        document.getElementById('chk-live').addEventListener('change', function () { setLive(this.checked); });
+
+        document.getElementById('btn-all').addEventListener('click', () => {
+            mask = new Array(gw * gh).fill('1'); dirty = true; renderMask();
+        });
+        document.getElementById('btn-none').addEventListener('click', () => {
+            mask = new Array(gw * gh).fill('0'); dirty = true; renderMask();
+        });
+        document.getElementById('btn-invert').addEventListener('click', () => {
+            mask = mask.map(c => c === '1' ? '0' : '1'); dirty = true; renderMask();
+        });
+        document.getElementById('btn-save-roi').addEventListener('click', () => saveRoi(false));
+        document.getElementById('btn-clear-roi').addEventListener('click', () => saveRoi(true));
+
+        document.getElementById('btn-new-zone').addEventListener('click', startNewZone);
+        document.getElementById('btn-save-zone').addEventListener('click', saveZone);
+        document.getElementById('btn-cancel-zone').addEventListener('click', () => {
+            editing = null; showForm(false); renderZoneLayer();
+        });
+        document.getElementById('btn-add-rect').addEventListener('click', () => {
+            if (!editing) startNewZone();
+            if (!editing) return;
+            const num = id => parseInt(document.getElementById(id).value, 10);
+            const r = { x: num('rect-x'), y: num('rect-y'), w: num('rect-w'), h: num('rect-h') };
+            if ([r.x, r.y, r.w, r.h].some(v => !Number.isFinite(v))) return;
+            addRect(r);
+        });
+        ['zone-name', 'zone-color', 'zone-alert'].forEach(id => {
+            document.getElementById(id).addEventListener('input', () => {
+                if (!editing) return;
+                readForm();
+                renderZoneLayer();
+            });
+        });
+
+        // Deferred i18n.js may not have run yet when this script is parsed, so all
+        // dynamic text is (re)rendered here and again on a language change.
+        document.addEventListener('DOMContentLoaded', () => {
+            setMode('roi');
+            loadSnapshot();
+            loadRoi().then(loadZones);
+            // stream_url is what works behind a proxy or on a non-default port.
+            fetch('/api/status', { credentials: 'same-origin' })
+                .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+                .then(d => { if (d.stream_url) streamUrl = d.stream_url; })
+                .catch(() => {});
+        });
+        window.addEventListener('i18n:change', () => {
+            renderZoneList();
+            renderRectList();
+            setMode(mode);
+        });
+    })();
+    </script>
+</body>
+</html>

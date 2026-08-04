@@ -1,169 +1,124 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>Admin - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
+    <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
+         that the inline script below relies on. i18n.js stays deferred. -->
+    <script src="/common.js"></script>
+    <script src="/i18n.js" defer></script>
 </head>
 <body>
     <div class="page">
         <div class="pg-header">
-            <h1>Administrace</h1>
-            <a href="/" class="back-link">Zpet</a>
+            <h1 data-i18n="admin.title">Administration</h1>
+            <a href="/" class="back-link" data-i18n="nav.back">Back</a>
         </div>
 
-        <div class="nav-tabs">
-            <a href="/" class="nav-tab">Prehled</a>
-            <a href="/settings.html" class="nav-tab">Nastaveni</a>
-            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
-            <a href="/admin.html" class="nav-tab active">Admin</a>
-            <a href="/gallery.html" class="nav-tab">Galerie</a>
-        </div>
+        <nav class="nav-tabs" aria-label="Main" data-i18n-aria-label="aria.nav">
+            <a href="/"              class="nav-tab"        data-i18n="nav.overview">Overview</a>
+            <a href="/settings.html" class="nav-tab"        data-i18n="nav.settings">Settings</a>
+            <a href="/zones.html"    class="nav-tab"        data-i18n="nav.zones">Zones</a>
+            <a href="/wifi.html"     class="nav-tab"        data-i18n="nav.wifi">Wi-Fi</a>
+            <a href="/admin.html"    class="nav-tab active" aria-current="page" data-i18n="nav.admin">Admin</a>
+            <a href="/gallery.html"  class="nav-tab"        data-i18n="nav.gallery">Gallery</a>
+        </nav>
 
         <!-- System Info -->
         <details open>
-            <summary><span class="sec-color" style="background:var(--accent)"></span> Systemove informace</summary>
+            <summary><span class="sec-color" style="background:var(--accent)"></span> <span data-i18n="admin.sys">System info</span></summary>
             <div class="sec-body">
                 <div class="info-grid">
-                    <div class="info-card">
-                        <div class="label">Firmware</div>
-                        <div class="value" id="sys-version">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">CPU</div>
-                        <div class="value" id="sys-cpu">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Uptime</div>
-                        <div class="value" id="sys-uptime">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Free Heap</div>
-                        <div class="value" id="sys-heap">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Free PSRAM</div>
-                        <div class="value" id="sys-psram">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Total PSRAM</div>
-                        <div class="value" id="sys-psram-total">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Flash</div>
-                        <div class="value" id="sys-flash">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">SDK</div>
-                        <div class="value" id="sys-sdk" style="font-size:.7em">--</div>
-                    </div>
+                    <div class="info-card"><div class="label" data-i18n="index.info.version">Firmware</div><div class="value" id="sys-version">--</div></div>
+                    <div class="info-card"><div class="label">CPU</div><div class="value" id="sys-cpu">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="index.info.uptime">Uptime</div><div class="value" id="sys-uptime">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="index.info.heap">Free heap</div><div class="value" id="sys-heap">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="index.info.psram">Free PSRAM</div><div class="value" id="sys-psram">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="admin.psram.total">Total PSRAM</div><div class="value" id="sys-psram-total">--</div></div>
+                    <div class="info-card"><div class="label">Flash</div><div class="value" id="sys-flash">--</div></div>
+                    <div class="info-card"><div class="label">SDK</div><div class="value" id="sys-sdk" style="font-size:.7em">--</div></div>
                 </div>
             </div>
         </details>
 
         <!-- Camera Info -->
         <details>
-            <summary><span class="sec-color" style="background:var(--purple)"></span> Kamera</summary>
+            <summary><span class="sec-color" style="background:var(--purple)"></span> <span data-i18n="admin.camera">Camera</span></summary>
             <div class="sec-body">
                 <div class="info-grid">
-                    <div class="info-card">
-                        <div class="label">Sensor PID</div>
-                        <div class="value" id="cam-pid">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">FPS</div>
-                        <div class="value" id="cam-fps">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Celkem snimku</div>
-                        <div class="value" id="cam-count">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Chyby</div>
-                        <div class="value" id="cam-errors">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Stream klienti</div>
-                        <div class="value" id="cam-clients">--</div>
-                    </div>
+                    <div class="info-card"><div class="label">Sensor PID</div><div class="value" id="cam-pid">--</div></div>
+                    <div class="info-card"><div class="label">FPS</div><div class="value" id="cam-fps">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="admin.cam.count">Total frames</div><div class="value" id="cam-count">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="admin.cam.errors">Errors</div><div class="value" id="cam-errors">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="admin.cam.clients">Stream clients</div><div class="value" id="cam-clients">--</div></div>
                 </div>
-                <button class="btn btn-outline btn-block" style="margin-top:10px" onclick="reinitCamera()">
-                    Reinicializovat kameru
-                </button>
+                <button class="btn btn-outline btn-block" style="margin-top:10px" onclick="reinitCamera()"
+                        data-i18n="admin.cam.reinit">Reinitialize camera</button>
             </div>
         </details>
 
         <!-- SD Card -->
         <details>
-            <summary><span class="sec-color" style="background:var(--yellow)"></span> SD karta</summary>
+            <summary><span class="sec-color" style="background:var(--yellow)"></span> <span data-i18n="admin.sd">SD card</span></summary>
             <div class="sec-body">
                 <div class="info-grid">
-                    <div class="info-card">
-                        <div class="label">Stav</div>
-                        <div class="value" id="sd-status">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Celkem</div>
-                        <div class="value" id="sd-total">--</div>
-                    </div>
-                    <div class="info-card">
-                        <div class="label">Pouzito</div>
-                        <div class="value" id="sd-used">--</div>
-                    </div>
+                    <div class="info-card"><div class="label" data-i18n="admin.sd.status">Status</div><div class="value" id="sd-status">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="admin.sd.total">Total</div><div class="value" id="sd-total">--</div></div>
+                    <div class="info-card"><div class="label" data-i18n="admin.sd.used">Used</div><div class="value" id="sd-used">--</div></div>
                 </div>
             </div>
         </details>
 
         <!-- OTA Update -->
         <details>
-            <summary><span class="sec-color" style="background:var(--green)"></span> OTA aktualizace</summary>
+            <summary><span class="sec-color" style="background:var(--green)"></span> <span data-i18n="admin.ota">OTA update</span></summary>
             <div class="sec-body">
-                <p style="font-size:.85em;color:var(--text-dim);margin-bottom:16px">
-                    Aktualizace firmware pres webove rozhrani. Nahrajte soubor .bin pro firmware
-                    nebo .bin pro filesystem (LittleFS).
+                <p style="font-size:.85em;color:var(--text-dim);margin-bottom:16px" data-i18n="admin.ota.hint">
+                    Firmware update via web interface. Upload a .bin for firmware or a .bin for the filesystem (LittleFS).
                 </p>
-                <a href="/update" class="btn btn-primary btn-block" target="_blank">
-                    Otevrit OTA stranku
-                </a>
+                <a href="/update" class="btn btn-primary btn-block" target="_blank" data-i18n="admin.ota.open">Open OTA page</a>
             </div>
         </details>
 
         <!-- Actions -->
         <details>
-            <summary><span class="sec-color" style="background:var(--red)"></span> Systemove akce</summary>
+            <summary><span class="sec-color" style="background:var(--red)"></span> <span data-i18n="admin.actions">System actions</span></summary>
             <div class="sec-body">
                 <div style="display:flex;flex-direction:column;gap:10px">
-                    <button class="btn btn-outline btn-block" onclick="confirmReboot()">
-                        Restartovat zarizeni
-                    </button>
-                    <button class="btn btn-danger btn-block" onclick="confirmReset()">
-                        Tovarni reset
-                    </button>
+                    <button class="btn btn-outline btn-block" onclick="confirmReboot()" data-i18n="admin.action.reboot">Reboot device</button>
+                    <button class="btn btn-danger btn-block"  onclick="confirmReset()"  data-i18n="admin.action.reset">Factory reset</button>
                 </div>
-                <p style="font-size:.75em;color:var(--text-muted);margin-top:12px">
-                    Tovarni reset smaze veskerou konfiguraci a restartuje zarizeni do AP rezimu.
+                <p style="font-size:.75em;color:var(--text-muted);margin-top:12px" data-i18n="admin.action.reset.hint">
+                    Factory reset erases all configuration and reboots into AP mode.
                 </p>
             </div>
         </details>
 
         <!-- API Documentation -->
         <details>
-            <summary><span class="sec-color" style="background:#64748b"></span> API endpointy</summary>
+            <summary><span class="sec-color" style="background:#64748b"></span> <span data-i18n="admin.api">API endpoints</span></summary>
             <div class="sec-body" style="font-size:.82em;color:var(--text-dim)">
                 <div style="font-family:monospace;line-height:2">
-                    <div><strong>GET</strong> /api/status - Stav systemu (JSON)</div>
+                    <div><strong>GET</strong> /api/status - System status (JSON)</div>
                     <div><strong>GET</strong> /api/snapshot - Snapshot (JPEG)</div>
                     <div><strong>GET</strong> :81/stream - MJPEG stream</div>
-                    <div><strong>POST</strong> /api/settings - Zmena nastaveni</div>
-                    <div><strong>GET</strong> /api/wifi/scan - Scan siti</div>
-                    <div><strong>POST</strong> /api/wifi - Pripojeni k siti</div>
-                    <div><strong>POST</strong> /api/reboot - Restart</div>
+                    <div><strong>POST</strong> /api/settings - Change settings</div>
+                    <div><strong>GET</strong> /api/wifi/scan - Scan networks</div>
+                    <div><strong>POST</strong> /api/wifi - Join network</div>
+                    <div><strong>POST</strong> /api/reboot - Reboot</div>
                     <div><strong>POST</strong> /api/reset - Factory reset</div>
-                    <div><strong>POST</strong> /api/camera/reinit - Reinit kamery</div>
-                    <div><strong>GET</strong> /api/sd/list?path=/ - SD karta</div>
-                    <div><strong>GET</strong> /api/sd/download?file= - Stahnout</div>
-                    <div><strong>DELETE</strong> /api/sd/delete?file= - Smazat</div>
+                    <div><strong>POST</strong> /api/camera/reinit - Camera reinit</div>
+                    <div><strong>GET</strong> /api/sd/list?path=/ - SD listing</div>
+                    <div><strong>GET</strong> /api/sd/download?file= - Download</div>
+                    <div><strong>DELETE</strong> /api/sd/delete?file= - Delete</div>
+                    <div><strong>GET</strong> /api/zones - Detection zones (JSON)</div>
+                    <div><strong>POST</strong> /api/zones - Add / update a zone</div>
+                    <div><strong>DELETE</strong> /api/zones?name= - Delete a zone</div>
+                    <div><strong>GET</strong> /api/roi - ROI mask + grid size</div>
+                    <div><strong>POST</strong> /api/roi - Set ROI mask</div>
+                    <div><strong>GET</strong> /api/csrf - CSRF token (auth required)</div>
                     <div><strong>WS</strong> /ws - WebSocket (real-time status)</div>
                 </div>
             </div>
@@ -173,84 +128,127 @@
     <div id="toast" class="toast"></div>
 
     <!-- Confirmation dialog -->
-    <div id="confirm-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;
-         display:none;align-items:center;justify-content:center;padding:20px">
-        <div style="background:#1a1a2e;border:1px solid var(--border);border-radius:16px;padding:24px;max-width:400px;width:100%">
-            <h3 style="color:#fff;margin-bottom:12px" id="confirm-title">Potvrzeni</h3>
+    <div id="confirm-overlay" class="modal-backdrop" role="dialog" aria-modal="true"
+         aria-labelledby="confirm-title" aria-describedby="confirm-text">
+        <div class="modal-panel">
+            <h3 style="color:#fff;margin-bottom:12px" id="confirm-title" data-i18n="admin.confirm.generic">Confirmation</h3>
             <p style="color:var(--text-dim);margin-bottom:20px;font-size:.9em" id="confirm-text"></p>
             <div style="display:flex;gap:10px">
-                <button class="btn btn-outline" style="flex:1" onclick="closeConfirm()">Zrusit</button>
-                <button class="btn btn-danger" style="flex:1" id="confirm-btn" onclick="">Potvrdit</button>
+                <button type="button" class="btn btn-outline" style="flex:1" id="confirm-cancel" data-i18n="common.cancel">Cancel</button>
+                <button type="button" class="btn btn-danger"  style="flex:1" id="confirm-btn"    data-i18n="common.confirm">Confirm</button>
             </div>
         </div>
     </div>
 
     <script>
+    // T() and showToast() come from common.js.
     function loadInfo() {
-        fetch('/api/status').then(r => r.json()).then(d => {
-            document.getElementById('sys-version').textContent = d.version;
-            document.getElementById('sys-cpu').textContent = d.cpu_freq + ' MHz';
-            document.getElementById('sys-uptime').textContent = d.uptime;
-            document.getElementById('sys-heap').textContent = Math.floor(d.free_heap/1024) + ' KB';
-            document.getElementById('sys-psram').textContent = Math.floor(d.free_psram/1024/1024) + ' MB';
+        fetch('/api/status').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(d => {
+            document.getElementById('sys-version').textContent   = d.version;
+            document.getElementById('sys-cpu').textContent       = d.cpu_freq + ' MHz';
+            document.getElementById('sys-uptime').textContent    = d.uptime;
+            document.getElementById('sys-heap').textContent      = Math.floor(d.free_heap/1024) + ' KB';
+            document.getElementById('sys-psram').textContent     = Math.floor(d.free_psram/1024/1024) + ' MB';
             document.getElementById('sys-psram-total').textContent = Math.floor(d.total_psram/1024/1024) + ' MB';
-            document.getElementById('sys-flash').textContent = Math.floor(d.flash_size/1024/1024) + ' MB';
-            document.getElementById('sys-sdk').textContent = d.sdk;
+            document.getElementById('sys-flash').textContent     = Math.floor(d.flash_size/1024/1024) + ' MB';
+            document.getElementById('sys-sdk').textContent       = d.sdk;
 
-            document.getElementById('cam-pid').textContent = d.sensor_pid ? '0x' + d.sensor_pid.toString(16).toUpperCase() : 'N/A';
-            document.getElementById('cam-fps').textContent = d.capture_fps ? d.capture_fps.toFixed(1) : '--';
-            document.getElementById('cam-count').textContent = d.capture_count || '0';
-            document.getElementById('cam-errors').textContent = d.capture_errors || '0';
+            document.getElementById('cam-pid').textContent     = d.sensor_pid ? '0x' + d.sensor_pid.toString(16).toUpperCase() : 'N/A';
+            document.getElementById('cam-fps').textContent     = d.capture_fps ? d.capture_fps.toFixed(1) : '--';
+            document.getElementById('cam-count').textContent   = d.capture_count || '0';
+            document.getElementById('cam-errors').textContent  = d.capture_errors || '0';
             document.getElementById('cam-clients').textContent = d.stream_clients || '0';
 
-            document.getElementById('sd-status').textContent = d.sd_mounted ? 'Pripojeno' : 'Nepripojeno';
-            document.getElementById('sd-total').textContent = d.sd_total_mb ? d.sd_total_mb + ' MB' : '--';
-            document.getElementById('sd-used').textContent = d.sd_used_mb !== undefined ? d.sd_used_mb + ' MB' : '--';
+            document.getElementById('sd-status').textContent = d.sd_mounted ? T('admin.sd.mounted') : T('admin.sd.missing');
+            document.getElementById('sd-total').textContent  = d.sd_total_mb ? d.sd_total_mb + ' MB' : '--';
+            document.getElementById('sd-used').textContent   = d.sd_used_mb !== undefined ? d.sd_used_mb + ' MB' : '--';
+        }).catch(err => {
+            document.getElementById('sys-uptime').textContent = T('common.error');
+            console.warn('loadInfo failed:', err.message);
         });
+    }
+
+    // Every mutation below now reports failure. Previously a failed request left
+    // either an unhandled rejection or a success toast for something that never ran.
+    function postAction(url, okText) {
+        return apiFetch(url, {method:'POST'})
+            .then(r => r.json().catch(() => ({success: r.ok})))
+            .then(d => {
+                const ok = d.success !== false;
+                showToast(d.message || okText, ok ? 'success' : 'error');
+            })
+            .catch(err => showToast(T('common.error') + ': ' + err.message, 'error'));
     }
 
     function reinitCamera() {
-        fetch('/api/camera/reinit', {method:'POST'})
-            .then(r => r.json())
-            .then(d => showToast(d.message, d.success ? 'success' : 'error'));
+        postAction('/api/camera/reinit', T('common.online'));
     }
 
+    // The dialog is a real dialog now: labelled, Esc-closable, focus moves in on
+    // open and back to the triggering button on close, and Tab cannot leave it.
     let confirmAction = null;
+    let confirmReturnFocus = null;
     function showConfirm(title, text, action) {
         document.getElementById('confirm-title').textContent = title;
-        document.getElementById('confirm-text').textContent = text;
-        document.getElementById('confirm-overlay').style.display = 'flex';
+        document.getElementById('confirm-text').textContent  = text;
+        document.getElementById('confirm-overlay').classList.add('open');
+        confirmReturnFocus = document.activeElement;
         confirmAction = action;
-        document.getElementById('confirm-btn').onclick = function() {
-            closeConfirm();
-            if (confirmAction) confirmAction();
-        };
+        document.getElementById('confirm-btn').focus();
     }
     function closeConfirm() {
-        document.getElementById('confirm-overlay').style.display = 'none';
+        const ov = document.getElementById('confirm-overlay');
+        if (!ov.classList.contains('open')) return;
+        ov.classList.remove('open');
+        confirmAction = null;
+        if (confirmReturnFocus && confirmReturnFocus.focus) confirmReturnFocus.focus();
+        confirmReturnFocus = null;
+    }
+    function confirmFocusables() {
+        return [document.getElementById('confirm-cancel'), document.getElementById('confirm-btn')];
     }
 
     function confirmReboot() {
-        showConfirm('Restart zarizeni', 'Opravdu chcete restartovat kameru? Stream bude prerusen.', function() {
-            fetch('/api/reboot', {method:'POST'}).then(() => showToast('Restartuji...', 'info'));
+        showConfirm(T('admin.confirm.reboot.title'), T('admin.confirm.reboot.text'), function() {
+            postAction('/api/reboot', T('admin.rebooting'));
         });
     }
-
     function confirmReset() {
-        showConfirm('Tovarni reset', 'POZOR: Veskerou konfiguraci se smaze! Zarizeni se prepne do AP rezimu. Pokracovat?', function() {
-            fetch('/api/reset', {method:'POST'}).then(() => showToast('Resetuji...', 'info'));
+        showConfirm(T('admin.confirm.reset.title'), T('admin.confirm.reset.text'), function() {
+            postAction('/api/reset', T('admin.resetting'));
         });
     }
 
-    function showToast(text, type) {
-        const t = document.getElementById('toast');
-        t.textContent = text;
-        t.className = 'toast ' + type + ' show';
-        setTimeout(() => t.className = 'toast', 3000);
-    }
+    // Wait for DOMContentLoaded: i18n.js is deferred, so calling loadInfo()
+    // during parse rendered raw i18n keys instead of translations.
+    document.addEventListener('DOMContentLoaded', () => {
+        loadInfo();
+        setInterval(() => { if (document.visibilityState === 'visible') loadInfo(); }, 5000);
 
-    loadInfo();
-    setInterval(loadInfo, 5000);
+        const ov = document.getElementById('confirm-overlay');
+        document.getElementById('confirm-cancel').addEventListener('click', closeConfirm);
+        document.getElementById('confirm-btn').addEventListener('click', () => {
+            const act = confirmAction;
+            closeConfirm();
+            if (act) act();
+        });
+        ov.addEventListener('click', e => { if (e.target === ov) closeConfirm(); });
+        document.addEventListener('keydown', e => {
+            if (!ov.classList.contains('open')) return;
+            if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); return; }
+            if (e.key !== 'Tab') return;
+            const items = confirmFocusables();
+            const i = items.indexOf(document.activeElement);
+            e.preventDefault();
+            const next = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1)
+                                    : (i < 0 || i === items.length - 1 ? 0 : i + 1);
+            items[next].focus();
+        });
+    });
+    window.addEventListener('i18n:change', loadInfo);
     </script>
 </body>
 </html>

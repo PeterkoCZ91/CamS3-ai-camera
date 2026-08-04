@@ -1,10 +1,12 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Galerie - CamS3</title>
+    <title>Gallery - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
+    <script src="/common.js"></script>
+    <script src="/i18n.js" defer></script>
     <style>
         .breadcrumb {
             display: flex; align-items: center; gap: 6px;
@@ -23,27 +25,56 @@
             width: 48px; height: 48px; border-radius: 6px;
             object-fit: cover; background: var(--bg-card);
             border: 1px solid var(--border);
+            cursor: pointer;
         }
+        .thumb-ph {
+            width: 48px; height: 48px; border-radius: 6px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.2em; color: var(--text-muted); flex-shrink: 0;
+        }
+        /* The preview trigger is a real button so it is reachable by keyboard and
+           focus can be handed back to it when the dialog closes. */
+        .thumb-btn {
+            padding: 0; border: 0; background: none;
+            line-height: 0; border-radius: 6px;
+            cursor: pointer; flex-shrink: 0;
+        }
+        .gal-toolbar {
+            display: flex; align-items: center; gap: 12px;
+            flex-wrap: wrap; margin-bottom: 12px; font-size: .82em;
+            color: var(--text-dim);
+        }
+        .gal-toolbar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
     </style>
 </head>
 <body>
     <div class="page">
         <div class="pg-header">
-            <h1>SD Galerie</h1>
-            <a href="/" class="back-link">Zpet</a>
+            <h1 data-i18n="gallery.title">SD Gallery</h1>
+            <a href="/" class="back-link" data-i18n="nav.back">Back</a>
         </div>
 
-        <div class="nav-tabs">
-            <a href="/" class="nav-tab">Prehled</a>
-            <a href="/settings.html" class="nav-tab">Nastaveni</a>
-            <a href="/wifi.html" class="nav-tab">Wi-Fi</a>
-            <a href="/admin.html" class="nav-tab">Admin</a>
-            <a href="/gallery.html" class="nav-tab active">Galerie</a>
-        </div>
+        <nav class="nav-tabs" aria-label="Main" data-i18n-aria-label="aria.nav">
+            <a href="/"              class="nav-tab"        data-i18n="nav.overview">Overview</a>
+            <a href="/settings.html" class="nav-tab"        data-i18n="nav.settings">Settings</a>
+            <a href="/zones.html"    class="nav-tab"        data-i18n="nav.zones">Zones</a>
+            <a href="/wifi.html"     class="nav-tab"        data-i18n="nav.wifi">Wi-Fi</a>
+            <a href="/admin.html"    class="nav-tab"        data-i18n="nav.admin">Admin</a>
+            <a href="/gallery.html"  class="nav-tab active" aria-current="page" data-i18n="nav.gallery">Gallery</a>
+        </nav>
 
         <!-- Breadcrumb -->
-        <div class="breadcrumb" id="breadcrumb">
-            <a href="#" onclick="navigate('/')">SD</a>
+        <nav class="breadcrumb" id="breadcrumb" aria-label="Path" data-i18n-aria-label="aria.path"></nav>
+
+        <div class="gal-toolbar">
+            <label for="chk-thumbs">
+                <input type="checkbox" id="chk-thumbs" checked>
+                <span data-i18n="gallery.thumbs">Show thumbnails</span>
+            </label>
+            <small style="color:var(--text-muted)" data-i18n="gallery.thumbs.hint">
+                The device cannot generate thumbnails, so every preview is the full JPEG.
+            </small>
         </div>
 
         <!-- File list -->
@@ -51,18 +82,25 @@
             <div id="file-list">
                 <div class="empty-state">
                     <div class="icon">&#128193;</div>
-                    <div>Nacitam...</div>
+                    <div data-i18n="gallery.loading">Loading...</div>
                 </div>
+            </div>
+            <div class="pager" id="pager" style="display:none">
+                <button type="button" class="btn btn-outline btn-sm" id="pg-prev" data-i18n="gallery.prev">Previous</button>
+                <span class="pager-info" id="pg-info" aria-live="polite"></span>
+                <button type="button" class="btn btn-outline btn-sm" id="pg-next" data-i18n="gallery.next">Next</button>
             </div>
         </div>
 
-        <!-- Preview overlay -->
-        <div id="preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);
-             z-index:300;align-items:center;justify-content:center;padding:20px;cursor:pointer"
-             onclick="closePreview()">
-            <img id="preview-img" style="max-width:100%;max-height:90vh;border-radius:8px" src="">
+        <!-- Preview dialog -->
+        <div id="preview-overlay" class="modal-backdrop" role="dialog" aria-modal="true"
+             aria-labelledby="preview-title" style="background:rgba(0,0,0,.9)">
+            <h2 id="preview-title" data-i18n="gallery.preview.title"
+                style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Image preview</h2>
+            <img id="preview-img" style="max-width:100%;max-height:90vh;border-radius:8px" alt="">
             <div style="position:absolute;top:16px;right:16px">
-                <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();closePreview()">Zavrit</button>
+                <button type="button" class="btn btn-outline btn-sm" id="preview-close"
+                        data-i18n="common.close">Close</button>
             </div>
         </div>
     </div>
@@ -70,142 +108,317 @@
     <div id="toast" class="toast"></div>
 
     <script>
+    // T / esc / showToast now live in common.js (loaded without defer).
+    const PAGE_SIZE = 24;
+
     let currentPath = '/';
+    let allFiles = [];
+    let page = 0;
+    let observer = null;
+    let lastFocus = null;
+
+    function thumbsEnabled() {
+        return document.getElementById('chk-thumbs').checked;
+    }
 
     function navigate(path) {
         currentPath = path;
+        page = 0;
         loadFiles(path);
         updateBreadcrumb(path);
     }
 
     function updateBreadcrumb(path) {
         const bc = document.getElementById('breadcrumb');
-        let html = '<a href="#" onclick="navigate(\'/\')">SD</a>';
+        bc.textContent = '';
+        const rootA = document.createElement('a');
+        rootA.href = '#'; rootA.textContent = 'SD';
+        rootA.addEventListener('click', e => { e.preventDefault(); navigate('/'); });
+        bc.appendChild(rootA);
         if (path !== '/') {
             const parts = path.split('/').filter(p => p);
             let acc = '';
             parts.forEach((p, i) => {
                 acc += '/' + p;
                 const isLast = i === parts.length - 1;
-                html += ' <span>/</span> ';
+                const sep = document.createElement('span'); sep.textContent = '/';
+                bc.appendChild(sep);
                 if (isLast) {
-                    html += '<span style="color:var(--text)">' + p + '</span>';
+                    const last = document.createElement('span');
+                    last.style.color = 'var(--text)';
+                    last.textContent = p;
+                    bc.appendChild(last);
                 } else {
-                    html += '<a href="#" onclick="navigate(\'' + acc + '\')">' + p + '</a>';
+                    const a = document.createElement('a');
+                    a.href = '#'; a.textContent = p;
+                    const acc2 = acc;
+                    a.addEventListener('click', e => { e.preventDefault(); navigate(acc2); });
+                    bc.appendChild(a);
                 }
             });
         }
-        bc.innerHTML = html;
     }
 
     function loadFiles(path) {
         const container = document.getElementById('file-list');
-        container.innerHTML = '<div class="empty-state"><div>Nacitam...</div></div>';
+        container.textContent = '';
+        const wait = document.createElement('div');
+        wait.className = 'empty-state';
+        wait.textContent = T('gallery.loading');
+        container.appendChild(wait);
+        document.getElementById('pager').style.display = 'none';
 
-        fetch('/api/sd/list?path=' + encodeURIComponent(path))
+        fetch('/api/sd/list?path=' + encodeURIComponent(path), { credentials: 'same-origin' })
             .then(r => {
-                if (!r.ok) throw new Error('SD karta neni dostupna');
+                if (!r.ok) throw new Error(T('gallery.unavailable') + ' (HTTP ' + r.status + ')');
                 return r.json();
             })
             .then(files => {
-                if (!files.length) {
-                    container.innerHTML = '<div class="empty-state"><div class="icon">&#128193;</div><div>Prazdna slozka</div></div>';
-                    return;
-                }
-
-                // Sort: directories first, then by name
-                files.sort((a, b) => {
+                allFiles = Array.isArray(files) ? files : [];
+                allFiles.sort((a, b) => {
                     if (a.dir !== b.dir) return b.dir - a.dir;
                     return a.name.localeCompare(b.name);
                 });
-
-                let html = '<ul class="file-list">';
-                files.forEach(f => {
-                    const fullPath = (currentPath === '/' ? '/' : currentPath + '/') + f.name;
-                    const sizeStr = f.dir ? '--' : formatSize(f.size);
-                    const isImage = /\.(jpg|jpeg|png|bmp)$/i.test(f.name);
-
-                    html += '<li class="file-item">';
-                    html += '<div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">';
-
-                    if (f.dir) {
-                        html += '<div style="font-size:1.5em">&#128193;</div>';
-                        html += '<div style="min-width:0"><div class="file-name" style="cursor:pointer" onclick="navigate(\'' +
-                            fullPath + '\')">' + f.name + '</div>';
-                        html += '<div class="file-size">slozka</div></div>';
-                    } else {
-                        if (isImage) {
-                            html += '<img class="thumb-preview" src="/api/sd/download?file=' +
-                                encodeURIComponent(fullPath) + '" loading="lazy" onclick="showPreview(\'' +
-                                fullPath + '\')" style="cursor:pointer">';
-                        } else {
-                            html += '<div style="font-size:1.5em">&#128196;</div>';
-                        }
-                        html += '<div style="min-width:0"><div class="file-name">' + f.name + '</div>';
-                        html += '<div class="file-size">' + sizeStr + '</div></div>';
-                    }
-                    html += '</div>';
-
-                    if (!f.dir) {
-                        html += '<div class="file-actions">';
-                        html += '<a class="btn btn-outline btn-sm" href="/api/sd/download?file=' +
-                            encodeURIComponent(fullPath) + '" download>Stahnout</a>';
-                        html += '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' +
-                            fullPath.replace(/'/g, "\\'") + '\')">Smazat</button>';
-                        html += '</div>';
-                    }
-
-                    html += '</li>';
-                });
-                html += '</ul>';
-                container.innerHTML = html;
+                page = 0;
+                renderPage();
             })
             .catch(err => {
-                container.innerHTML = '<div class="empty-state"><div class="icon" style="color:var(--red)">&#9888;</div>' +
-                    '<div>' + err.message + '</div></div>';
+                container.textContent = '';
+                const box = document.createElement('div');
+                box.className = 'empty-state';
+                const ic = document.createElement('div');
+                ic.className = 'icon'; ic.style.color = 'var(--red)'; ic.textContent = '\u26A0';
+                const msg = document.createElement('div');
+                msg.textContent = err.message;
+                box.appendChild(ic); box.appendChild(msg);
+                container.appendChild(box);
             });
     }
 
+    // Thumbnails are the full-resolution JPEGs (the firmware has no thumbnail
+    // endpoint), so a folder of 5MP captures used to mean tens of MB per listing.
+    // Two guards: only PAGE_SIZE rows exist at a time, and each row's image is
+    // requested only once it actually scrolls into view.
+    function makeObserver() {
+        if (observer) observer.disconnect();
+        if (!('IntersectionObserver' in window)) { observer = null; return; }
+        observer = new IntersectionObserver((entries, obs) => {
+            entries.forEach(en => {
+                if (!en.isIntersecting) return;
+                const el = en.target;
+                const src = el.getAttribute('data-src');
+                if (src && !el.getAttribute('src')) el.setAttribute('src', src);
+                obs.unobserve(el);
+            });
+        }, { rootMargin: '150px 0px' });
+    }
+
+    function renderPage() {
+        const container = document.getElementById('file-list');
+        container.textContent = '';
+        makeObserver();
+
+        if (!allFiles.length) {
+            const box = document.createElement('div');
+            box.className = 'empty-state';
+            const ic = document.createElement('div');
+            ic.className = 'icon'; ic.textContent = '\uD83D\uDCC1';
+            const msg = document.createElement('div');
+            msg.textContent = T('gallery.empty');
+            box.appendChild(ic); box.appendChild(msg);
+            container.appendChild(box);
+            document.getElementById('pager').style.display = 'none';
+            return;
+        }
+
+        const pages = Math.max(1, Math.ceil(allFiles.length / PAGE_SIZE));
+        if (page >= pages) page = pages - 1;
+        const slice = allFiles.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+
+        const ul = document.createElement('ul');
+        ul.className = 'file-list';
+        slice.forEach(f => ul.appendChild(renderRow(f)));
+        container.appendChild(ul);
+
+        const pager = document.getElementById('pager');
+        pager.style.display = pages > 1 ? '' : 'none';
+        document.getElementById('pg-info').textContent =
+            T('gallery.page') + ' ' + (page + 1) + '/' + pages + ' · ' +
+            allFiles.length + ' ' + T('gallery.items');
+        document.getElementById('pg-prev').disabled = page === 0;
+        document.getElementById('pg-next').disabled = page >= pages - 1;
+    }
+
+    function renderRow(f) {
+        const fullPath = (currentPath === '/' ? '/' : currentPath + '/') + f.name;
+        const isImage  = /\.(jpg|jpeg|png|bmp)$/i.test(f.name);
+
+        const li = document.createElement('li');
+        li.className = 'file-item';
+
+        const left = document.createElement('div');
+        left.style.cssText = 'display:flex;align-items:center;gap:12px;flex:1;min-width:0';
+
+        if (f.dir) {
+            const ic = document.createElement('div');
+            ic.style.fontSize = '1.5em'; ic.textContent = '\uD83D\uDCC1';
+            left.appendChild(ic);
+
+            const meta = document.createElement('div');
+            meta.style.minWidth = '0';
+            const name = document.createElement('button');
+            name.type = 'button';
+            name.className = 'file-name';
+            name.style.cssText = 'background:none;border:0;padding:0;color:#fff;cursor:pointer;' +
+                                 'font-family:inherit;text-align:left';
+            name.textContent = f.name;
+            name.addEventListener('click', () => navigate(fullPath));
+            const sub = document.createElement('div');
+            sub.className = 'file-size';
+            sub.textContent = T('gallery.folder');
+            meta.appendChild(name); meta.appendChild(sub);
+            left.appendChild(meta);
+        } else {
+            const openBtn = () => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'thumb-btn';
+                b.setAttribute('aria-label', T('gallery.preview.title') + ': ' + f.name);
+                b.addEventListener('click', () => showPreview(fullPath));
+                return b;
+            };
+
+            if (isImage && thumbsEnabled()) {
+                const img = document.createElement('img');
+                img.className = 'thumb-preview';
+                img.loading = 'lazy';
+                img.alt = '';                 // the button already names the target
+                img.setAttribute('data-src', '/api/sd/download?file=' + encodeURIComponent(fullPath));
+                if (observer) observer.observe(img);
+                else img.src = img.getAttribute('data-src');   // no IO support: fall back to loading=lazy
+                const b = openBtn();
+                b.appendChild(img);
+                left.appendChild(b);
+            } else {
+                const ph = document.createElement('div');
+                ph.className = 'thumb-ph';
+                ph.textContent = isImage ? '\uD83D\uDDBC' : '\uD83D\uDCC4';
+                if (isImage) {
+                    const b = openBtn();
+                    b.appendChild(ph);
+                    left.appendChild(b);
+                } else {
+                    left.appendChild(ph);
+                }
+            }
+
+            const meta = document.createElement('div');
+            meta.style.minWidth = '0';
+            const name = document.createElement('div');
+            name.className = 'file-name';
+            name.textContent = f.name;
+            const sub = document.createElement('div');
+            sub.className = 'file-size';
+            sub.textContent = formatSize(f.size);
+            meta.appendChild(name); meta.appendChild(sub);
+            left.appendChild(meta);
+        }
+
+        li.appendChild(left);
+
+        if (!f.dir) {
+            const actions = document.createElement('div');
+            actions.className = 'file-actions';
+            const dl = document.createElement('a');
+            dl.className = 'btn btn-outline btn-sm';
+            dl.href = '/api/sd/download?file=' + encodeURIComponent(fullPath);
+            dl.setAttribute('download', '');
+            dl.textContent = T('common.download');
+            actions.appendChild(dl);
+            const del = document.createElement('button');
+            del.type = 'button';
+            del.className = 'btn btn-danger btn-sm';
+            del.textContent = T('common.delete');
+            del.addEventListener('click', () => deleteFile(fullPath));
+            actions.appendChild(del);
+            li.appendChild(actions);
+        }
+        return li;
+    }
+
     function formatSize(bytes) {
+        if (bytes == null) return '--';
         if (bytes < 1024) return bytes + ' B';
         if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
         return (bytes/1024/1024).toFixed(1) + ' MB';
     }
 
+    // ── Preview dialog (full resolution is fetched only here) ────────────────
     function showPreview(path) {
-        document.getElementById('preview-img').src = '/api/sd/download?file=' + encodeURIComponent(path);
-        document.getElementById('preview-overlay').style.display = 'flex';
+        lastFocus = document.activeElement;
+        const img = document.getElementById('preview-img');
+        img.src = '/api/sd/download?file=' + encodeURIComponent(path);
+        img.alt = path;
+        document.getElementById('preview-overlay').classList.add('open');
+        document.getElementById('preview-close').focus();
     }
 
     function closePreview() {
-        document.getElementById('preview-overlay').style.display = 'none';
-        document.getElementById('preview-img').src = '';
+        const ov = document.getElementById('preview-overlay');
+        if (!ov.classList.contains('open')) return;
+        ov.classList.remove('open');
+        document.getElementById('preview-img').removeAttribute('src');
+        if (lastFocus && lastFocus.focus) lastFocus.focus();
+        lastFocus = null;
     }
 
     function deleteFile(path) {
-        if (!confirm('Smazat soubor ' + path + '?')) return;
+        if (!confirm(T('gallery.delete.confirm') + ': ' + path)) return;
 
-        fetch('/api/sd/delete?file=' + encodeURIComponent(path), {method:'DELETE'})
-            .then(r => r.json())
+        apiFetch('/api/sd/delete?file=' + encodeURIComponent(path), {method:'DELETE'})
+            .then(r => r.json().catch(() => ({success: r.ok})))
             .then(d => {
                 if (d.success) {
-                    showToast('Soubor smazan', 'success');
+                    showToast(T('gallery.delete.ok'), 'success');
                     loadFiles(currentPath);
                 } else {
-                    showToast('Chyba: ' + (d.message || 'neznama'), 'error');
+                    showToast(T('common.error') + ': ' + (d.message || d.error || '?'), 'error');
                 }
             })
-            .catch(() => showToast('Chyba pri mazani', 'error'));
+            .catch(() => showToast(T('gallery.delete.err'), 'error'));
     }
 
-    function showToast(text, type) {
-        const t = document.getElementById('toast');
-        t.textContent = text;
-        t.className = 'toast ' + type + ' show';
-        setTimeout(() => t.className = 'toast', 3000);
-    }
+    // Deferred scripts (i18n.js) must be in place before the first render,
+    // otherwise the listing shows raw i18n keys.
+    document.addEventListener('DOMContentLoaded', () => {
+        const chk = document.getElementById('chk-thumbs');
+        chk.checked = localStorage.getItem('cams3_gallery_thumbs') !== '0';
+        chk.addEventListener('change', () => {
+            localStorage.setItem('cams3_gallery_thumbs', chk.checked ? '1' : '0');
+            renderPage();
+        });
 
-    navigate('/');
+        document.getElementById('pg-prev').addEventListener('click', () => {
+            if (page > 0) { page--; renderPage(); window.scrollTo(0, 0); }
+        });
+        document.getElementById('pg-next').addEventListener('click', () => {
+            page++; renderPage(); window.scrollTo(0, 0);
+        });
+
+        const ov = document.getElementById('preview-overlay');
+        document.getElementById('preview-close').addEventListener('click', closePreview);
+        ov.addEventListener('click', e => { if (e.target === ov) closePreview(); });
+        // Esc closes, Tab stays inside: the dialog has a single focusable control.
+        document.addEventListener('keydown', e => {
+            if (!ov.classList.contains('open')) return;
+            if (e.key === 'Escape') { e.preventDefault(); closePreview(); }
+            else if (e.key === 'Tab') { e.preventDefault(); document.getElementById('preview-close').focus(); }
+        });
+
+        navigate('/');
+    });
+    // Re-render from the cached listing — no need to hit the SD card again.
+    window.addEventListener('i18n:change', () => { updateBreadcrumb(currentPath); renderPage(); });
     </script>
 </body>
 </html>
