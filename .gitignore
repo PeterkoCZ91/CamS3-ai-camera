@@ -1,2 +1,17 @@
+# PlatformIO build output and downloaded dependencies
 .pio/
+
+# Editor / tooling
 .vscode/
+.codegraph/
+
+# Edge Impulse FOMO export — ~24 MB of generated SDK + one specific trained model.
+# Bring your own: see docs/fomo_setup.md.
+lib/ei-person-fomo/
+
+# Local operator notes: keep private deployment details out of the repo
+# (addresses, credentials, site specifics).
+LOCAL_*.md
+*.local.md
+secrets.json
+data/ca.pem

@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    name: Firmware (ci env)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # The `ci` env builds everything except person detection. The Edge Impulse
+      # FOMO export is deliberately not in the repository (docs/fomo_setup.md), so
+      # the default env cannot build on a clean checkout.
+      - name: Build firmware
+        run: pio run -e ci
+
+      - name: Build filesystem image
+        run: pio run -e ci -t buildfs
+
+  web-ui:
+    name: Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax-check standalone scripts
+        run: |
+          for f in data/www/*.js; do
+            node --check "$f"
+          done
+
+      - name: Syntax-check inline page scripts
+        run: node tools/check_www.js --scripts
+
+      - name: Check translation parity and key coverage
+        run: node tools/check_www.js --i18n
