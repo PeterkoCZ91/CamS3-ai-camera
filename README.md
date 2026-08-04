@@ -496,7 +496,7 @@ drop the feature — every guarded module compiles away cleanly.
 | `INCLUDE_SD_CARD` | on | SD mount, `sd_store` rotation/breaker, capture saving, gallery endpoints |
 | `INCLUDE_MOTION_DETECT` | on | `motion_detect.cpp` + the motion task (prerequisite for person/face/zones) |
 | `INCLUDE_PERSON_DETECT` | on | `person_detection.cpp` + tracker; **needs a FOMO model or the build fails** |
-| `INCLUDE_FACE_DETECT` | **off** | esp-dl MSR01/MNP01 face task — deprecated upstream, crashes at runtime, +660 kB flash |
+| `INCLUDE_FACE_DETECT` | **off** | esp-dl MSR01/MNP01 face task — deprecated upstream (headers removed in arduino-esp32 v3.1+), +660 kB flash, and a panic was observed with it enabled |
 | `INCLUDE_ZONES` | on | `zone_manager.cpp`, `/api/zones`, `/api/roi`, ROI mask persistence |
 | `INCLUDE_EVENT_LOG` | on | `event_log.cpp`, `/api/events` |
 | `INCLUDE_TELEGRAM` | on | bot task, notifications, commands |
@@ -636,7 +636,7 @@ VLAN or behind an authenticating reverse proxy, and do not port-forward it.
 
 | Item | State |
 |---|---|
-| Face detection | Off by default — esp-dl `HumanFaceDetectMSR01` is deprecated in the Arduino core and crashes at runtime. Code kept, compiles, one line to re-enable. Migration target: a FOMO face model. |
+| Face detection | Off by default. `HumanFaceDetectMSR01` comes from esp-dl's deprecated `dl_lib` API — arduino-esp32 removed those headers in v3.1+, so the pinned core is the last one that compiles it — and it costs ~660 kB of flash. A `LoadStoreError` panic was also observed on this hardware with it enabled; see [`docs/known_issues.md`](docs/known_issues.md) for the signature and what is and is not verified. Code kept and building; one line to re-enable. Migration target: a FOMO face model. |
 | Capture resolution | The sensor is 5 MP, but the firmware runs UXGA 1600×1200 (`frame_size 13`). The PY260 driver in the Arduino core cannot sustain capture at QSXGA — it yields 0 fps and errors. Decode buffers are nevertheless sized for QSXGA/8 so no `frame_size` can overflow them. |
 | Audio | The PDM microphone pins are in `board_config.h`, but there is no I²S code. `/audio-status` returns `available: false`. |
 | AVI recording | `AviWriter` (RIFF/AVI 1.0 MJPEG muxer) is implemented and unit-clean, but nothing calls it. `POST /record` returns HTTP 501. `INCLUDE_AVI_WRITER` currently has no effect. |

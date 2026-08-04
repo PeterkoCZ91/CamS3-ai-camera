@@ -29,10 +29,27 @@ no face detection task, and `/api/status` omits `face_detected`, `face_count`,
 `face_event_count` and `face_inference_ms` (the `face_detect_*` settings keys are
 still accepted and reported — they are simply inert).
 
-### Why
+### Why — two independent reasons
 
 `src/face_detect.cpp` uses `HumanFaceDetectMSR01` and `HumanFaceDetectMNP01` from
-esp-dl's old `dl_lib` API. On this target that combination crashes:
+esp-dl's old `dl_lib` API.
+
+**1. The dependency is dead upstream (verifiable).** The `dl_lib` API is deprecated and
+arduino-esp32 **removed these headers entirely in v3.1+**
+([arduino-esp32#10881](https://github.com/espressif/arduino-esp32/issues/10881));
+Espressif moved to esp-dl v3.x, which takes ONNX models and is ESP-IDF-only. The pinned
+`espressif32@6.12.0` (Arduino core 2.0.17) is the **last** version where this module
+compiles at all, and the library is unmaintained there. So this code has no future
+regardless of whether it currently works.
+
+**2. It costs ~660 kB of flash** — 67.1 % of the app partition with it, 45.9 % without.
+On a board that also has to fit an Edge Impulse model and two OTA slots, that is reason
+enough on its own.
+
+### What was observed — and what is not verified
+
+Beyond the two reasons above there is a **single crash report**, recorded on this
+hardware in **April 2026**:
 
 ```
 Guru Meditation Error: Core 0 panic'ed (LoadStoreError)
@@ -40,18 +57,19 @@ Guru Meditation Error: Core 0 panic'ed (LoadStoreError)
   EXCVADDR = 0x431d13f0     <- I-cache region, i.e. a corrupted pointer
 ```
 
-It reproduces on the first motion event that wakes the cascade. A 16-byte alignment
-fix for the decode buffer is already in place (`heap_caps_aligned_alloc(16, …)`,
-because the tie728 SIMD kernels require 16-byte-aligned input and plain `ps_malloc`
-is only 4-byte aligned) — it was necessary but not sufficient.
+It was reported to reproduce on the first motion event that wakes the cascade. A 16-byte
+alignment fix for the decode buffer is in place (`heap_caps_aligned_alloc(16, …)`,
+because the tie728 SIMD kernels need 16-byte-aligned input and plain `ps_malloc` is only
+4-byte aligned) — necessary, but reportedly not sufficient.
 
-The root cause is upstream, not in this code. The `dl_lib` API is deprecated:
-arduino-esp32 **removed these headers entirely in v3.1+**
-([arduino-esp32#10881](https://github.com/espressif/arduino-esp32/issues/10881)),
-and Espressif moved to esp-dl v3.x, which takes ONNX models and is ESP-IDF-only.
-The pinned `espressif32@6.12.0` (Arduino core 2.0.17) is the **last** version where
-this module compiles at all, and the library is unmaintained there. The same family
-of failures is reported in
+**Treat this as an observation, not a general property of the code.** It has not been
+re-verified since, it is a single data point on one board, and this exact signature (the
+s16 variant with EXCVADDR in the I-cache window) is not publicly reported by anyone else.
+If you enable the flag and it runs fine for you, that does not contradict anything
+written here — reasons 1 and 2 stand on their own.
+
+The surrounding family of failures *is* reported upstream, which is why the report is
+plausible rather than dismissed —
 [esp-who#69](https://github.com/espressif/esp-who/issues/69),
 [esp-dl#237](https://github.com/espressif/esp-dl/issues/237) and
 [arduino-esp32#9671](https://github.com/espressif/arduino-esp32/issues/9671) —

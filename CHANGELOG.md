@@ -16,10 +16,13 @@ filesystem image has to be re-uploaded (see below).
   silently discarded. After flashing, run `pio run -t uploadfs` — the old LittleFS image
   no longer matches the shrunk partition and will not mount, losing `config.json`,
   zones and the event log. Encrypted secrets in NVS survive (same offset and size).
-- **Face detection is off by default.** `HumanFaceDetectMSR01` from esp-dl is deprecated
-  in the Arduino core and crashes at runtime on this target. The code is kept and still
-  builds; re-enable by uncommenting `-DINCLUDE_FACE_DETECT`. Side effect: the default
-  build dropped from 67.1 % to 45.9 % flash and from 24.7 % to 21.7 % RAM.
+- **Face detection is off by default**, for two independent reasons: `HumanFaceDetectMSR01`
+  comes from esp-dl's deprecated `dl_lib` API (arduino-esp32 removed the headers in v3.1+,
+  so the pinned core is the last one that compiles it), and it costs ~660 kB of flash — the
+  default build dropped from 67.1 % to 45.9 % flash and from 24.7 % to 21.7 % RAM. A
+  `LoadStoreError` panic was also observed on this hardware with it enabled; see
+  `docs/known_issues.md` for what is verified and what is a single unreproduced report.
+  The code is kept and still builds; re-enable by uncommenting `-DINCLUDE_FACE_DETECT`.
 - **The Edge Impulse FOMO model is no longer in the repository** (`lib/ei-person-fomo/`
   is gitignored). With `-DINCLUDE_PERSON_DETECT` on and no model present the build now
   fails with an explanatory `#error`. See `docs/fomo_setup.md`.
