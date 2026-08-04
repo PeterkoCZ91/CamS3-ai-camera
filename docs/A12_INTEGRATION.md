@@ -1,46 +1,37 @@
 # A12 companion integration
 
-The firmware is designed to run on its own, but it can also act as the edge half of a
-two-stage detection pipeline. The camera does cheap, always-on detection (motion, then
-a small FOMO person model); a companion service — referred to here as **A12** — runs
-the expensive models (YOLO-class detection, face recognition) on frames the camera is
-unsure about.
+The firmware runs standalone, but it is also built to feed **A12**, a companion
+service that does the heavy detection off-device: it consumes the camera's MJPEG
+stream continuously and runs its own models (a YOLO-class detector over the COCO
+classes, optional face recognition, and a vision model for scene descriptions).
 
-This document is the contract between the two. Replace `<camera-ip>` with the
-camera's address, or use its mDNS name (`cams3.local` by default, from
-`wifi.hostname`).
+Get the division of labour right, because it is the opposite of what "edge AI"
+usually implies:
 
-## Why two stages
-
-The FOMO model on the ESP32-S3 is ~64×64 grayscale and runs in a few hundred
-milliseconds. It is good enough to say "probably nobody" or "definitely somebody", but
-it spends a lot of its time in between. Rather than guess, the firmware classifies
-every confirmed detection into three states (`PersonDecision` in
-`include/person_detection.h`):
-
-| Decision | Condition | What the firmware does |
-|---|---|---|
-| `NONE` | score < `person_detect_confidence` | Nothing |
-| `UNCERTAIN` | between the two thresholds | Publishes MQTT `person_uncertain` — this is A12's cue |
-| `CONFIDENT` | score ≥ `person_confident_threshold` | Notifies directly (Telegram / MQTT) |
-
-Both thresholds are runtime-configurable (`POST /api/settings` →
-`person_detect_confidence`, `person_confident_threshold`), so you can tune how much
-work you push to A12 without reflashing.
-
-## HTTP endpoints A12 uses
-
-| Purpose | Endpoint |
+| | Job |
 |---|---|
-| Readiness / telemetry | `http://<camera-ip>/a12/status` (alias `/api/a12/status`) |
-| Detection MJPEG stream | `http://<camera-ip>:81/detection-stream` |
-| Operator MJPEG stream | `http://<camera-ip>:81/stream` |
-| Single frame | `http://<camera-ip>/frame` |
-| Stream statistics | `http://<camera-ip>/stream-stats` |
-| Health probe | `http://<camera-ip>/health` |
+| **Camera** | Always-on, cheap: motion on an adaptive background model, a small FOMO person model to gate notifications, and a stable MJPEG stream. Notifies on its own when it is confident. |
+| **A12** | The actual detection. Pulls `/detection-stream` frame after frame and decides what is in the picture, with models the ESP32 could never run. |
 
-None of these require authentication, which is deliberate for the stream path but is
-also a limitation — see `docs/known_issues.md`.
+The camera is not a detector that occasionally asks for help; it is a well-behaved
+frame source that happens to also do useful cheap detection of its own. Both halves
+work without the other.
+
+Replace `<camera-ip>` with the camera's address, or use its mDNS name
+(`cams3.local` by default, from `wifi.hostname`).
+
+## What A12 consumes
+
+| Purpose | Endpoint | Notes |
+|---|---|---|
+| Frame source | `http://<camera-ip>:81/detection-stream` | The primary integration. Continuous MJPEG. |
+| Liveness | `http://<camera-ip>/health` | What A12 polls. Small, cheap, stable field set. |
+| Rich telemetry | `http://<camera-ip>/a12/status` (alias `/api/a12/status`) | Offered by the firmware for automation; A12 does not currently use it. Useful for dashboards and for diagnosing why the camera is unhealthy. |
+| Single frame | `http://<camera-ip>/frame` | Recovery snapshots, tests. |
+| Stream statistics | `http://<camera-ip>/stream-stats` | Client counts, FPS, frame age. |
+
+None of these require authentication. That is deliberate for the stream path and is
+also a limitation — see [`known_issues.md`](known_issues.md).
 
 ### Use `/detection-stream`, not `/stream`
 
@@ -49,57 +40,53 @@ There are two MJPEG routes on port 81 and they are not interchangeable:
 - The detection route has its own client counter (`detection_clients`), so the camera
   can tell an automated consumer apart from someone watching the dashboard.
 - Either route being connected switches the capture task to `active_fps`, so A12 alone
-  is enough to raise the frame rate — the operator does not have to keep a browser open.
+  keeps the frame rate up — nobody has to leave a browser open.
 - Each MJPEG part carries `X-Timestamp` and `X-Frame-Age` headers, so A12 can drop
-  stale frames instead of analysing them.
+  stale frames instead of spending inference on them.
 - The stream never re-sends a frame it already sent: it waits for a newer entry in the
   ring buffer. Duplicate-frame analysis is wasted GPU time.
 - The route is capped at 2 concurrent clients (`MAX_DETECTION_STREAM_CLIENTS`), so a
   reconnect storm cannot starve the capture task. A third client gets HTTP 503.
 
-## Readiness check
+## Liveness
 
-Treat the camera as ready when `/a12/status` reports:
+A12 polls `/health`. Treat the camera as usable when it reports:
 
 ```
-ok              == true
-wifi_mode       == "STA"
-capture_count   >  0
+wifi_connected  == true
+capture_fps     >  0
 frame_age_ms    <  10000
 capture_errors  not increasing over time
 ```
 
-`ok` is computed by the firmware as "Wi-Fi connected AND at least one frame captured
-AND the newest frame is younger than 10 s", so checking `ok` alone is usually enough;
-the individual fields are there to tell you *why* it is false.
+`/health` also carries `reset_reason` and `total_restarts`, which is how you notice a
+camera that is technically answering but rebooting in a loop.
 
-## `/a12/status` fields
+`/a12/status` is the same picture plus detection state, stream URLs and capture
+configuration, and it computes an `ok` flag for you (Wi-Fi up AND at least one frame
+captured AND newest frame younger than 10 s). Prefer the URLs it reports
+(`stream_url`, `detection_stream_url`, `snapshot_url`) over building them yourself —
+they stay correct behind a proxy or on a non-default port.
 
-Identity and link: `ok`, `device`, `version`, `ip`, `mac`, `wifi_mode`, `wifi_rssi`,
-`uptime_sec`.
+## The camera's own detection
 
-Streaming: `stream_url`, `detection_stream_url`, `snapshot_url`, `stream_port`,
-`stream_clients`, `detection_clients`, `total_stream_clients`.
+The FOMO model on the ESP32-S3 is ~64×64 grayscale and runs in a few hundred
+milliseconds. Good enough to say "probably nobody" or "definitely somebody", and it
+spends a lot of its time in between — so every confirmed detection is classified into
+three states (`PersonDecision` in `include/person_detection.h`):
 
-Capture: `capture_fps`, `capture_count`, `capture_errors`, `last_capture_ms`,
-`frame_age_ms`, `active_fps`, `idle_fps`, `frame_size`, `jpeg_quality`.
+| Decision | Condition | Firmware behaviour |
+|---|---|---|
+| `NONE` | score < `person_detect_confidence` | Nothing |
+| `UNCERTAIN` | between the two thresholds | Publishes an MQTT hint (below) |
+| `CONFIDENT` | score ≥ `person_confident_threshold` | Notifies directly (Telegram / MQTT) |
 
-Detection: `motion_enabled`, `motion_detected`, `motion_changed_pct`,
-`motion_avg_brightness`, `motion_night_mode`, `motion_training`, `person_enabled`,
-`person_detected`, `person_decision`, `person_count`, `person_track_count`,
-`person_top_score`, `person_inference_ms`.
+Both thresholds are runtime-configurable (`POST /api/settings` →
+`person_detect_confidence`, `person_confident_threshold`), so you decide how much the
+camera handles alone. Push `person_confident_threshold` to 1.0 and the camera never
+notifies by itself — every decision is A12's.
 
-Integrations: `mqtt_enabled`, `mqtt_connected`, `telegram_enabled`, `sd_mounted`.
-
-Prefer the URLs the camera reports (`stream_url`, `detection_stream_url`,
-`snapshot_url`) over building them yourself — they stay correct if the ports change or
-the camera sits behind a proxy.
-
-`GET /api/status` returns a superset of these (~140 keys) including memory,
-restart history and every configuration value; `/a12/status` is the stable, smaller
-subset intended for automation.
-
-## MQTT contract
+## MQTT
 
 Set `mqtt_enabled`, `mqtt_server`, `mqtt_port`, optional `mqtt_user`/`mqtt_pass` and
 `mqtt_topic_prefix` (default `cams3`). Below, `<prefix>` is that value.
@@ -112,16 +99,34 @@ Published by the camera:
 | `<prefix>/motion/state` | `ON` / `OFF` | yes | Edge-triggered |
 | `<prefix>/person/state` | `ON` / `OFF` | yes | Only for `CONFIDENT` |
 | `<prefix>/person/attributes` | `{"count":N}` | yes | Confirmed tracks |
-| `<prefix>/person_uncertain` | `{"confidence":0.68,"tracks":1}` | no | **A12's trigger to verify** |
+| `<prefix>/person_uncertain` | `{"confidence":0.68,"tracks":1}` | no | Hint: "I saw something, I am not sure" |
 | `<prefix>/face/state` | `ON` / `OFF` | yes | Only when face detection is compiled in |
 | `<prefix>/status` | JSON: `uptime`, `heap`, `heap_min`, `heap_total`, `psram`, `fps`, `rssi`, `clients` | no | Every 30 s |
 | `<prefix>/camera/status/heartbeat` | `{"uptime":…,"free_heap":…}` | no | Every 5 s |
 | `<prefix>/camera/status/profile` | `DAY` / `DUSK` / `NIGHT` | yes | Derived from frame brightness (this board has no lux sensor) |
 
-`person_uncertain` is rate-limited to one publish per `person_detect_cooldown`, so a
-person loitering in a poorly lit spot will not flood A12.
+`person_uncertain` is rate-limited to one publish per `person_detect_cooldown`, so
+someone loitering in a badly lit spot cannot flood the broker.
 
-Subscribed by the camera — A12 can change settings without an HTTP round trip:
+### Topic names do not line up out of the box
+
+A12 subscribes to two hint topics under a **different naming scheme** than this
+firmware publishes:
+
+| A12 subscribes to | This firmware publishes | Match? |
+|---|---|---|
+| `esp32cam/<device>/person_uncertain` | `<prefix>/person_uncertain` | Only if `mqtt_topic_prefix` is set to `esp32cam/<device>` |
+| `esp32cam/<device>/motion` (`ON`/`OFF`) | `<prefix>/motion/state` | **No** — the trailing `/state` does not match even with the prefix above |
+
+`<device>` is A12's `esp32_mqtt_device` setting (default `ESP32-Camera`).
+
+So: set `mqtt_topic_prefix` to `esp32cam/<device>` and the `person_uncertain` hint
+reaches A12's YOLO routing. The motion hint does not arrive under any prefix — which
+costs nothing important, because A12 sees motion in the stream it is already
+decoding. Treat both as optimizations, not as the integration.
+
+Subscribed by the camera — A12 (or Home Assistant, or anything else) can change
+settings without an HTTP round trip:
 
 ```
 <prefix>/config/set/motion/enabled     ON | OFF | true | false | 1 | 0
@@ -130,14 +135,15 @@ Subscribed by the camera — A12 can change settings without an HTTP round trip:
 ```
 
 Underscore forms (`motion_enabled`, `motion_threshold`, `person_detect_enabled`) and
-the legacy `camera/config/set/#` prefix are accepted as well. Anything else is logged
-and ignored. Accepted changes are persisted, so they survive a reboot.
+the legacy `camera/config/set/#` prefix are accepted too — and A12 already subscribes
+to `camera/config/set/#`, so if both listen on one broker, be aware that a config
+message on that legacy prefix is seen by both. Anything else is logged and ignored.
+Accepted changes are persisted and survive a reboot.
 
 Home Assistant auto-discovery is published on first connect under
 `homeassistant/binary_sensor/<hostname>/…` and `homeassistant/sensor/<hostname>/…`
 (motion, person, face, uptime, plus FPS / heap / min-heap / PSRAM / RSSI / clients as
-diagnostic entities). If A12 and Home Assistant share a broker, the discovery entities
-and the raw topics above coexist without interfering.
+diagnostic entities).
 
 ## Suggested soak test
 
@@ -155,6 +161,6 @@ and the raw topics above coexist without interfering.
 
 The PY260 is a 5 MP sensor, but the firmware runs at `frame_size: 13`
 (UXGA 1600×1200) because the PY260 driver in arduino-esp32 2.0.x cannot sustain
-capture above that. For a verification pipeline UXGA is the pragmatic choice anyway:
-lower latency, less PSRAM and Wi-Fi pressure, and A12's models downscale their input
-regardless.
+capture above that. For a stream that feeds an off-device detector, UXGA is the
+pragmatic choice anyway: lower latency, less PSRAM and Wi-Fi pressure, and A12's
+models downscale their input regardless.

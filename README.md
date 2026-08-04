@@ -468,11 +468,17 @@ otherwise falls back to `setInsecure()`.
 
 ### A12 analytics contract
 
-`GET /a12/status` (alias `/api/a12/status`) is one flat JSON document for external
-analytics consumers: identity, stream URLs, capture counters, `frame_age_ms`,
+The companion service (**A12**) does the heavy detection off-device: it consumes
+`/detection-stream` continuously and runs its own models. The camera's role in that
+pairing is a stable frame source plus cheap always-on gating — not a detector that
+occasionally asks for help. A12 polls `/health` for liveness.
+
+`GET /a12/status` (alias `/api/a12/status`) is one flat JSON document offered for
+automation and dashboards: identity, stream URLs, capture counters, `frame_age_ms`,
 detection state including `person_decision` / `person_top_score` /
-`person_inference_ms`, and integration flags. The readiness gate and full field
-list are in [`docs/a12_m5stack_contract.md`](docs/a12_m5stack_contract.md).
+`person_inference_ms`, and integration flags. Field list, MQTT topic map and the
+topic-naming caveats are in
+[`docs/A12_INTEGRATION.md`](docs/A12_INTEGRATION.md).
 
 The rule worth repeating here: **analytics consumers must use
 `/detection-stream`, not `/stream`.** Detection clients are counted separately, a
@@ -693,7 +699,7 @@ coredump.bin` and decode with `espcoredump.py`.
 | [`docs/FIRST_FLASH.md`](docs/FIRST_FLASH.md) | flashing a blank board, USB/CDC, recovery |
 | [`docs/known_issues.md`](docs/known_issues.md) | known bugs and limitations with reproduction steps |
 | [`docs/fomo_setup.md`](docs/fomo_setup.md) | training and dropping in an Edge Impulse FOMO model |
-| [`docs/A12_INTEGRATION.md`](docs/A12_INTEGRATION.md) | two-stage detection: the `/a12/status` contract, the `person_uncertain` MQTT handshake and the MQTT topic map |
+| [`docs/A12_INTEGRATION.md`](docs/A12_INTEGRATION.md) | pairing with the A12 companion detector: what it consumes, the MQTT topic map and where the topic names do not line up |
 | [`SECURITY.md`](SECURITY.md) | threat model, what is protected, hardening checklist |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | build/verify steps and the concurrency rules worth knowing before touching tasks |
 | [`CHANGELOG.md`](CHANGELOG.md) | version history |

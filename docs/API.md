@@ -147,7 +147,7 @@ Legend: **Auth** = Basic Auth required. **CSRF** = `X-CSRF-Token` required
 `issues` is always an empty string — reserved, not yet populated.
 
 `GET /a12/status` — a flattened subset for an external integration (see
-`docs/a12_m5stack_contract.md`). `ok` is `true` only when WiFi is connected, at
+[`A12_INTEGRATION.md`](A12_INTEGRATION.md)). `ok` is `true` only when WiFi is connected, at
 least one frame has been captured, and `frame_age_ms < 10000`. It carries
 `stream_url`, `detection_stream_url`, `snapshot_url`, `stream_port`, the capture
 counters, camera geometry, and motion/person/MQTT/Telegram/SD flags. Fields absent
