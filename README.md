@@ -1,8 +1,27 @@
 # CamS3 5MP Advanced Camera Firmware
 
-[![Platform](https://img.shields.io/badge/platform-espressif32%406.12.0-blue)](https://github.com/platformio/platform-espressif32)
-[![Framework](https://img.shields.io/badge/framework-Arduino-00979D)](https://github.com/espressif/arduino-esp32)
-[![Board](https://img.shields.io/badge/board-M5Stack%20Unit%20CamS3%205MP-orange)](https://docs.m5stack.com/en/unit/Unit-CAMS3%205MP)
+[![Build](https://github.com/PeterkoCZ91/CamS3-ai-camera/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/PeterkoCZ91/CamS3-ai-camera/actions/workflows/build.yml)
+[![Firmware version](https://img.shields.io/badge/firmware-v2.0.0-2ea44f)](CHANGELOG.md)
+[![License: MIT](https://img.shields.io/github/license/PeterkoCZ91/CamS3-ai-camera)](LICENSE)
+
+[![Hardware: M5Stack Unit CamS3 5MP](https://img.shields.io/badge/hardware-M5Stack%20Unit%20CamS3%205MP-orange)](https://docs.m5stack.com/en/unit/Unit-CAMS3%205MP)
+[![MCU: ESP32-S3](https://img.shields.io/badge/MCU-ESP32--S3-E7352C?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![PlatformIO](https://img.shields.io/badge/PlatformIO-project-f5822a?logo=platformio&logoColor=white)](https://platformio.org/)
+[![Platform: Espressif 32 6.12.0](https://img.shields.io/badge/platform-Espressif%2032%206.12.0-blue)](https://github.com/platformio/platform-espressif32)
+[![Framework: Arduino](https://img.shields.io/badge/framework-Arduino-00878F?logo=arduino&logoColor=white)](https://github.com/espressif/arduino-esp32)
+[![Language: C++](https://img.shields.io/badge/language-C%2B%2B-00599C?logo=cplusplus&logoColor=white)](src)
+[![Python 3.11](https://img.shields.io/badge/build%20tools-Python%203.11-3776AB?logo=python&logoColor=white)](.github/workflows/build.yml)
+
+[![Wi-Fi](https://img.shields.io/badge/connectivity-Wi--Fi-0A84FF?logo=wifi&logoColor=white)](#first-boot)
+[![Web UI](https://img.shields.io/badge/client-Web%20UI-4285F4?logo=googlechrome&logoColor=white)](data/www)
+[![REST API](https://img.shields.io/badge/API-HTTP%20%2F%20REST-5A29E4)](docs/API.md)
+[![MJPEG streaming](https://img.shields.io/badge/stream-MJPEG-8A2BE2)](docs/API.md)
+[![WebSocket](https://img.shields.io/badge/realtime-WebSocket-010101?logo=socketdotio&logoColor=white)](docs/API.md)
+[![MQTT](https://img.shields.io/badge/integration-MQTT-660066?logo=mqtt&logoColor=white)](src/mqtt_handler.cpp)
+[![Home Assistant](https://img.shields.io/badge/integration-Home%20Assistant-18BCF2?logo=homeassistant&logoColor=white)](src/mqtt_handler.cpp)
+[![Telegram](https://img.shields.io/badge/client-Telegram%20Bot-26A5E4?logo=telegram&logoColor=white)](src/telegram.cpp)
+[![OTA](https://img.shields.io/badge/update-OTA-00A98F)](#ota)
+
 [![Flash](https://img.shields.io/badge/flash-45.9%25%20of%203%20MB-green)](#build-footprint)
 [![RAM](https://img.shields.io/badge/DRAM-21.7%25-green)](#build-footprint)
 
