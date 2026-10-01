@@ -15,10 +15,13 @@ Contents:
 6. [AVI recording is not wired up](#6-avi-recording-is-not-wired-up)
 7. [Stubbed endpoints for hardware this board does not have](#7-stubbed-endpoints-for-hardware-this-board-does-not-have)
 8. [The person detection model is not in this repository](#8-the-person-detection-model-is-not-in-this-repository)
-9. [Frames larger than 256 kB are dropped without a trace](#9-frames-larger-than-256-kb-are-dropped-without-a-trace)
+9. [Frames larger than 256 kB are dropped](#9-frames-larger-than-256-kb-are-dropped)
 10. [Notification text is Czech only](#10-notification-text-is-czech-only)
 11. [Smaller deliberate constraints](#11-smaller-deliberate-constraints)
 12. [Toolchain is pinned and cannot be upgraded yet](#12-toolchain-is-pinned-and-cannot-be-upgraded-yet)
+13. [Large single flash writes can kill the chip on some boards](#13-large-single-flash-writes-can-kill-the-chip-on-some-boards)
+14. [/api/status reports configuration, not live sensor state](#14-apistatus-reports-configuration-not-live-sensor-state)
+15. [No illumination output, and auto exposure leaves faces dark against a bright background](#15-no-illumination-output-and-auto-exposure-leaves-faces-dark-against-a-bright-background)
 
 ---
 
@@ -113,9 +116,10 @@ missing headers are still `#include`d inside the `#ifdef` branch.
 ## 2. Resolutions above UXGA do not work
 
 The sensor is a 5 MP PY260 and `POST /api/settings` clamps `frame_size` to
-`FRAMESIZE_QVGA` … `FRAMESIZE_QSXGA`, i.e. **5 … 21** — but only **5 … 13**
-(QVGA … UXGA 1600×1200) is usable. The settings page deliberately offers nothing
-above 13:
+`FRAMESIZE_QVGA` … `FRAMESIZE_UXGA`, i.e. **5 … 13** (QVGA … UXGA 1600×1200);
+14–21 are rejected by the clamp because a persisted one can boot-loop the device
+(a value already stored in an old `/config.json` is not touched by this change).
+The settings page offers nothing above 13:
 
 ```
 5  QVGA  320x240      10 XGA  1024x768
@@ -357,16 +361,15 @@ is in this repository.
 
 ---
 
-## 9. Frames larger than 256 kB are dropped without a trace
+## 9. Frames larger than 256 kB are dropped
 
 `MAX_FRAME_SIZE` in `src/camera_manager.cpp` is 256 kB per ring-buffer slot
 (3 slots, PSRAM). The capture task publishes a frame only `if (fb->len <=
-MAX_FRAME_SIZE)`. There is no `else`: an oversized frame is skipped, and **no
-counter records it.**
-
-`ringDroppedFrames` (`ring_dropped` in `/api/status`) counts a different case —
-every slot held by a reader, which is logged — so an oversized-frame problem does
-not show up there either.
+MAX_FRAME_SIZE)`. An oversized frame is skipped and counted in
+`ringDroppedFrames` (`ring_dropped` in `/api/status` and `/health`, with
+`ring_oversize` for the oversized subset); the first and every 50th are logged and
+`/health` raises `frames being dropped` while the counter grows. The same counter
+also covers the case where every slot is held by a reader.
 
 ### When it bites
 
@@ -405,6 +408,13 @@ is no language setting today.
 ## 11. Smaller deliberate constraints
 
 Things that are limits rather than bugs, worth knowing before you file an issue.
+
+**One MJPEG client at a time on port 81.** The stream server is a single
+`esp_http_server` task; an open `/stream` or `/detection-stream` connection occupies
+it, so further stream or `/snapshot` requests on port 81 wait until it closes. The
+client caps (3 / 2) only bound the counters. A dropped peer is noticed after ~2 s
+idle (socket `MSG_PEEK` probe); use port 80 `/api/snapshot` for stills while a stream
+is open.
 
 **Telegram silent mode is lost on reboot.** `/ticho <minutes>` suppresses
 notifications until a `millis()` deadline held in RAM only. This is intentional: a
@@ -480,3 +490,59 @@ dependency. Until then, treat the pin as load-bearing.
 
 `lib_ldf_mode = deep+` is likewise required, not cosmetic — it is what lets the
 `__has_include()` shim in `src/person_detection.cpp` find the Edge Impulse library.
+
+---
+
+## 13. Large single flash writes can kill the chip on some boards
+
+On at least one unit, `pio run -t upload` (esptool) writes the small regions —
+bootloader, partition table, otadata — and verifies them, then fails on the first large
+write with `A fatal error occurred: The chip stopped responding` or `Packet content
+transfer stopped`. `esptool erase_flash` fails the same way, and `dmesg` shows the USB
+device re-enumerating repeatedly.
+
+### What was observed
+
+One 1.4 MB write kept failing; the same image written in 64 kB pieces succeeded. The
+cause is **not established** — power or the USB link is the suspect.
+
+### Mitigation
+
+`python3 tools/flash_chunked.py --port /dev/ttyACM0` writes the app in 64 kB pieces
+with retries (`--dry-run` prints the plan). `--fs` adds the web UI image but is
+experimental and has not been run on hardware. After a chunked firmware write the board
+has no filesystem: the web UI answers `404` until it is written, the JSON API works.
+See `docs/FIRST_FLASH.md` §5.
+
+---
+
+## 14. /api/status reports configuration, not live sensor state
+
+`ae_level`, `aec_value`, `agc_gain`, `gainceiling`, `aec`, `agc` and the other camera
+fields are echoed from `appConfig` (`src/web_server.cpp`, lines ~273-282). They are
+what was last configured, not what the sensor is doing, so they cannot show what auto
+exposure actually chose. Only images or sensor register reads can.
+
+---
+
+## 15. No illumination output, and auto exposure leaves faces dark against a bright background
+
+There is no light output of any kind:
+
+* `ir_led` in `/api/status` is hard-coded `false` (`src/web_server.cpp` ~436);
+* `led_enabled` only drives a status blink LED (`src/main.cpp` ~84);
+* `camera_profile` is a label derived from `ambient_light_lux` (~434-435), which is the
+  motion detector's frame brightness (see §7) and not a light measurement. It does not
+  change exposure.
+
+### What was observed
+
+On 2026-10-01, with a bright wall behind a person, auto exposure — even with
+`ae_level=2` — rendered the face as a silhouette (centre luminance about 35-51 out of
+255). Manual exposure (`aec=false`, `agc=false`, `aec_value=700`, `agc_gain=12`) brought
+it to about 108/255.
+
+### Workaround
+
+Use manual exposure for a fixed scene. It does not adapt to day and night. The real fix
+is front lighting on the subject.

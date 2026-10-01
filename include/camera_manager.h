@@ -49,11 +49,36 @@ void cameraClearReinitRequest();
 // writing sensor registers from the async server task races the capture DMA.
 void cameraRequestSettingsApply();
 
+// Read-only live sensor register view (GET /api/sensor). The capture task samples a
+// fixed register list every ~10 frames (and on a one-shot request) into a seq-lock
+// protected cache; callers only copy it and never touch SCCB. Register semantics
+// are UNVERIFIED for the PY260 (list is the OV5640 map). 0xFFFF = read failed.
+#define SENSOR_VIEW_REGS 20
+struct SensorView {
+    bool     valid;
+    uint16_t pid, ver, midh, midl;
+    uint32_t frame;                   // capture counter when sampled
+    uint16_t regs[SENSOR_VIEW_REGS];
+    bool     custom_set;              // a one-shot result exists
+    uint16_t custom_reg, custom_val;
+    uint32_t custom_frame;
+};
+bool cameraSensorViewGet(SensorView* out);          // false until first sample
+uint16_t cameraSensorViewRegAddr(int i);
+void cameraSensorViewRequestReg(uint16_t reg);      // one-shot, serviced by capture task
+bool cameraSensorViewOneShotPending();
+
 // Stats
 uint32_t getCaptureCount();
 float getCaptureFps();
 uint32_t getLastCaptureMs();
 uint32_t getCaptureErrors();
+// millis() of the last frame actually copied into the ring (0 = none yet). Unlike
+// getLastCaptureMs() it does not advance for dropped/oversize frames — use it to
+// judge whether consumers are being fed.
+uint32_t getLastPublishedMs();
+// Frames discarded for exceeding the ring slot size (also counted in ring dropped).
+uint32_t getOversizeDroppedFrames();
 // Frames the capture task had to throw away because every ring slot was held by a
 // reader — a sign that some consumer (stream client, detector) is falling behind.
 uint32_t getRingDroppedFrames();

@@ -123,6 +123,7 @@ Legend: **Auth** = Basic Auth required. **CSRF** = `X-CSRF-Token` required
 | GET | `/status` | no | – | Alias of `/api/status` |
 | GET | `/settings` | no | – | Alias of `/api/status` (reads current settings) |
 | GET | `/telemetry` | no | – | Alias of `/api/status` |
+| GET | `/api/sensor` | no (`?reg=` needs auth) | – | Read-only live sensor registers (below) |
 | GET | `/health` | no | – | Compact liveness document |
 | GET | `/a12/status` | no | – | Integration status document |
 | GET | `/api/a12/status` | no | – | Same handler as `/a12/status` |
@@ -140,8 +141,8 @@ Legend: **Auth** = Basic Auth required. **CSRF** = `X-CSRF-Token` required
   "uptime_sec": 4211, "uptime_seconds": 4211,
   "free_heap": 132840, "free_psram": 7154176,
   "wifi_connected": true, "wifi_rssi": -58,
-  "capture_fps": 14.9, "capture_errors": 0, "ring_dropped": 0,
-  "frame_age_ms": 62, "stream_clients": 1, "detection_clients": 0,
+  "capture_fps": 14.9, "capture_errors": 0, "ring_dropped": 0, "ring_oversize": 0,
+  "device_name": "camS3", "frame_age_ms": 62, "stream_clients": 1, "detection_clients": 0,
   "reset_reason": "SOFTWARE", "last_restart_reason_name": "SOFTWARE",
   "total_restarts": 12, "power_health": "ok",
   "power_restarts_poweron": 3, "power_restarts_brownout": 0,
@@ -155,8 +156,11 @@ dropping one breaks a monitor that cannot report that it went blind.
 | Field | Meaning |
 |---|---|
 | `ok` / `overall_health` | `false` / `"degraded"` when `issues` is non-empty |
-| `issues` | Semicolon-separated list of concrete complaints: `wifi down`, `no frame captured since boot`, `stale frame (>10s)`, `capture stalled`, `low heap`, `sd writes disabled`. Empty when healthy. |
+| `issues` | Semicolon-separated list of concrete complaints: `wifi down`, `no frame captured since boot`, `stale frame (>10s)`, `capture stalled` (not raised in the first ~5 s after boot, nor while frames are fresh), `frames being dropped` (`ring_dropped` grew since the previous `/health` poll), `low heap`, `sd writes disabled`. Empty when healthy. |
 | `uptime_sec`, `uptime_seconds` | The same value under both names |
+| `device_name` | Configured hostname; A12 derives its `esp32cam/<device>/…` MQTT topics from it |
+| `frame_age_ms` | Age of the last frame actually **published to the ring** (what streams and detectors can see), not of the last sensor grab |
+| `ring_dropped`, `ring_oversize` | Frames dropped (all slots held, or frame larger than a slot) and the oversized subset |
 | `reset_reason`, `last_restart_reason_name` | The same value under both names — `POWERON`, `BROWNOUT`, `TASK_WDT`, `PANIC`, `SOFTWARE`, … |
 | `power_health` | `"suspect"` when the restart pattern points at the power supply rather than at software: a brownout has been recorded, this boot *was* a brownout, or the board came up from a bare power-on more than once. Combine with `uptime_seconds` to tell a current problem from a historical one. |
 | `power_restarts_poweron`, `power_restarts_brownout`, `wdt_restarts`, `panic_restarts` | Per-cause counters, persisted across reboots |
@@ -199,6 +203,29 @@ rather than omitted, so a consumer never has to test for key presence.
 }
 ```
 
+`GET /api/sensor[?reg=0xNNNN]` — **read-only** live view of the camera sensor, to see
+what auto exposure/gain actually do (`/api/status` only echoes the configuration).
+The capture task samples a fixed register list every ~10 frames, between frames when
+the SCCB bus is idle; the handler only copies that cache and never touches the
+sensor. `503` until the first sample exists. Values are raw hex strings (`null` =
+read failed) keyed by register address. **Semantics are unverified**: the sensor is
+a PY260, an OV5640 derivative, and the list is the standard OV5640 map
+(0x3500-0x3503 exposure/AEC-AGC manual bits, 0x350A-0x350B gain, 0x3A0F-0x3A1F AEC
+stable range / control zone, 0x5688-0x568F metering weights), which may not apply.
+
+```json
+{"frame": 1840, "semantics_verified": false,
+ "id": {"pid": "0x5640", "ver": "0x00", "midh": "0x7F", "midl": "0xA2"},
+ "regs": {"0x3500": "0x00", "0x3501": "0x2E", "0x3502": "0x90", "0x3503": "0x00",
+          "0x350A": "0x00", "0x350B": "0x3F", "...": "(20 registers in total)"}}
+```
+
+(Example values are illustrative.) `?reg=0x3A0F` (hex, 16-bit, validated, `400` on
+error, requires auth) queues a one-shot read serviced by the capture task on its next
+frame. The handler does not wait (it must not block the async server), so the
+response carries the last one-shot result plus `"reg": {"addr","value","frame",
+"reg_pending"}`; while `reg_pending` is true, poll again for the fresh value.
+
 `GET /credentials` — behind auth, tells the UI what is stored without shipping the
 secrets: `{wifi_ssid, wifi_pass_set, telegram_token_set, telegram_chat_id,
 http_user, default_password}`. Note the Telegram **chat id is returned in clear
@@ -213,7 +240,7 @@ text** (only the bot token is masked).
 | GET | `/settings-page` | no | – | `302` redirect to `/settings.html` |
 
 One handler (`handleApiSettings`) serves both POST paths. Every key is optional;
-only keys present in the body are touched. Unknown keys are ignored silently.
+only keys present in the body are touched. Unknown keys, and keys with the wrong type, are not applied and are listed in the `ignored` array of the response (`success` stays `true`).
 Numeric values are clamped with `clampInt()` / `clampFloat()` — an out-of-range
 value is **not** an error, it is pulled to the nearest bound. Type matters: keys
 listed as `int` require an integral JSON number (`10.5` is ignored), while keys
@@ -222,11 +249,11 @@ listed as `float` also accept a JSON integer.
 Success responses:
 
 ```json
-{"success":true,"message":"Settings applied"}
+{"success":true,"message":"Settings applied","ignored":[]}
 ```
 
 ```json
-{"success":true,"message":"Settings applied, camera restarting","camera_restart":true}
+{"success":true,"message":"Settings applied, camera restarting","camera_restart":true,"ignored":[]}
 ```
 
 The second form is returned whenever `frame_size` actually changed value. A new
@@ -243,7 +270,7 @@ WebSocket clients.
 
 | Key | Type | Range (clamped) | Notes |
 | --- | --- | --- | --- |
-| `frame_size` | int | `5` … `21` | `FRAMESIZE_QVGA` … `FRAMESIZE_QSXGA`. **Triggers camera restart.** Only `5`–`13` are usable in practice — see `docs/known_issues.md` |
+| `frame_size` | int | `5` … `13` | `FRAMESIZE_QVGA` … `FRAMESIZE_UXGA`; larger values are clamped to `13` (14–21 are unsupported and a persisted one can boot-loop). **Triggers camera restart.** |
 | `jpeg_quality` | int | `4` … `63` | Lower = better quality, larger frames |
 | `brightness` | int | `-2` … `2` | |
 | `contrast` | int | `-2` … `2` | |
@@ -648,6 +675,7 @@ Reply: `{"success":true,"message":"Background model reset"}`.
 | --- | --- | --- | --- | --- |
 | GET | `/api/csrf` | **yes** | – | `{"token":"<32 hex chars>"}` |
 | POST | `/api/reboot` | **yes** | **yes** | `{"success":true,"message":"Rebooting..."}` |
+| POST | `/reboot` | **yes** | browser only | Alias of `/api/reboot` for A12 (`camera.py`); same handler |
 | POST | `/api/reset` | **yes** | **yes** | `{"success":true,"message":"Factory reset, rebooting..."}` |
 | POST | `/record` | **yes** | yes (browser-originated) | `501` |
 | POST | `/ir-control` | **yes** | yes (browser-originated) | Stub, see below |
@@ -752,6 +780,7 @@ A12 integration keeps working. They are thin aliases — same handler, same resp
 | `/status` | GET | `/api/status` |
 | `/settings` | GET | `/api/status` |
 | `/settings` | POST | `/api/settings` (CSRF: browser only) |
+| `/reboot` | POST | `/api/reboot` (CSRF: browser only) |
 | `/telemetry` | GET | `/api/status` |
 | `/frame` | GET | `/api/snapshot` |
 | `/snapshot` | GET | `/api/snapshot` |
@@ -990,6 +1019,14 @@ Without `-DINCLUDE_PERSON_DETECT` the live keys are still emitted, as
 
 No authentication, no CSRF, no config knob to add either. See section 8.
 
+**One stream client at a time in practice.** The port-81 server is a single
+`esp_http_server` task and an MJPEG handler holds it for as long as the client
+stays connected, so a second `/stream` or `/detection-stream` connection (and
+`/snapshot`) waits until the first ends. `MAX_STREAM_CLIENTS` (3) and the
+detection cap (2) are upper bounds on the counters, not concurrent capacity. A
+client that vanishes without closing is detected after ~2 s idle by a
+`MSG_PEEK` probe and the handler exits.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/stream` | MJPEG, UI/viewer role, max **3** clients (`MAX_STREAM_CLIENTS`) |
@@ -1047,8 +1084,8 @@ is why it can succeed where port 80's `/api/snapshot` returns `503`. A failed ca
 gives `500 Capture failed`.
 
 Note the name collision: `/snapshot` exists on **both** ports with different
-implementations. Port 80 copies into PSRAM and streams asynchronously; port 81 sends
-from the ring buffer or captures on demand.
+implementations. Port 80 copies into PSRAM and streams asynchronously; port 81 copies the
+ring frame out, releases the slot, then sends (with a 3 s send timeout), or captures on demand.
 
 ---
 

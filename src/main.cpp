@@ -137,9 +137,30 @@ static bool sdInit() {
 // Run a camera reinit and escalate to a reboot if the camera cannot be recovered.
 static void attemptCameraRecovery(const char* reason) {
     logCapture("[%s] Camera recovery (%s)\n", TAG, reason);
+
+    // A reinit that "succeeds" but never yields a frame resets failedReinits, so the
+    // fb_get-failure -> reinit loop used to repeat forever. Count recovery cycles
+    // that follow a successful reinit with no frame published since, and reboot.
+    static bool reinitedBefore = false;
+    static uint32_t publishedAtReinit = 0;
+    static int emptyReinitCycles = 0;
+    if (reinitedBefore) {
+        emptyReinitCycles = (getLastPublishedMs() == publishedAtReinit) ? emptyReinitCycles + 1 : 0;
+        if (emptyReinitCycles >= MAX_FAILED_REINITS) {
+            #ifdef INCLUDE_EVENT_LOG
+            logEvent(EVT_UNKNOWN, "camera reinit yields no frames, rebooting");
+            #endif
+            logCapture("[%s] %d reinits produced no frame — rebooting\n", TAG, emptyReinitCycles);
+            delay(200);
+            ESP.restart();
+        }
+    }
+
     if (cameraReinit()) {
         failedReinits = 0;
         consecutiveCaptureFails = 0;
+        reinitedBefore = true;
+        publishedAtReinit = getLastPublishedMs();
         return;
     }
 
@@ -170,11 +191,14 @@ static void healthWatchdog() {
     systemStatsTick();
 
     // Check capture health
-    uint32_t lastCapture = getLastCaptureMs();
-    if (lastCapture > 0 && (millis() - lastCapture) > 10000) {
+    // Judge by the last frame PUBLISHED to the ring, not the last fb_get: dropped
+    // (ring full) or oversize frames advance getLastCaptureMs() but feed nobody.
+    uint32_t lastCapture = getLastPublishedMs();
+    bool neverPublished = (lastCapture == 0 && getCaptureCount() > 0 && millis() > 30000);
+    if ((lastCapture > 0 && (millis() - lastCapture) > 10000) || neverPublished) {
         consecutiveCaptureFails++;
-        logCapture("[%s] WARNING: No capture for %lums (fails: %d)\n",
-                      TAG, millis() - lastCapture, consecutiveCaptureFails);
+        logCapture("[%s] WARNING: No frame published for %lums (fails: %d)\n",
+                      TAG, lastCapture ? millis() - lastCapture : millis(), consecutiveCaptureFails);
 
         if (consecutiveCaptureFails >= 3) {
             attemptCameraRecovery("no capture for 30s");
@@ -197,7 +221,7 @@ static void healthWatchdog() {
     int32_t drift = (int32_t)freeHeap - (int32_t)heapBaseline;
 
     logCapture("[%s] Health: heap=%uKB (min=%uKB max_block=%uKB frag=%d%% drift=%+dKB) "
-               "psram=%uKB fps=%.1f clients=%d/%d errors=%lu dropped=%lu\n",
+               "psram=%uKB fps=%.1f clients=%d/%d errors=%lu dropped=%lu oversize=%lu\n",
                TAG,
                (unsigned)(freeHeap / 1024),
                (unsigned)(ESP.getMinFreeHeap() / 1024),
@@ -209,7 +233,8 @@ static void healthWatchdog() {
                getStreamClientCount(),
                getDetectionStreamClientCount(),
                getCaptureErrors(),
-               (unsigned long)getRingDroppedFrames());
+               (unsigned long)getRingDroppedFrames(),
+               (unsigned long)getOversizeDroppedFrames());
 
     // Detection pipeline counters — the numbers you need when tuning thresholds.
     #if defined(INCLUDE_MOTION_DETECT) || defined(INCLUDE_PERSON_DETECT)
@@ -257,9 +282,13 @@ static void healthWatchdog() {
 }
 
 void setup() {
-    // Ensure the brownout detector is actually enabled (some boards disable it
-    // by default via ESP32_DISABLE_BROWNOUT_DETECTOR).
-    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0x10000); // enable, reset on BOD
+    // Set ENA + ANA_RST_EN + RST_ENA (read-modify-write, keeps the threshold/wait bits).
+    // The old plain write of 0x10000 only set RST_WAIT and cleared all three, i.e. it
+    // DISABLED the detector. Enabled, a supply sag now gives a clean BROWNOUT reset
+    // (counted in brownout_restarts) instead of undefined behaviour at low voltage.
+    REG_SET_BIT(RTC_CNTL_BROWN_OUT_REG, RTC_CNTL_BROWN_OUT_ENA |
+                RTC_CNTL_BROWN_OUT_ANA_RST_EN | RTC_CNTL_BROWN_OUT_RST_ENA);
+    uint32_t brownOutRegVal = REG_READ(RTC_CNTL_BROWN_OUT_REG);  // logged after logInit()
 
     // Task watchdog: 20s timeout, panic on trigger so core dump + reset happen.
     esp_task_wdt_init(20, true);
@@ -281,6 +310,7 @@ void setup() {
                   ESP.getPsramSize() / (1024 * 1024));
     logCapture("  Flash: %dMB\n", ESP.getFlashChipSize() / (1024 * 1024));
     logCapture("========================================\n");
+    logCapture("[%s] Brownout detector enabled, reg=0x%08lX\n", TAG, (unsigned long)brownOutRegVal);
 
     #ifdef INCLUDE_LED_CONTROL
     ledInit();
@@ -320,7 +350,9 @@ void setup() {
     #endif
 
     // Initialize camera
-    if (!cameraInit()) {
+    // Capture/motion tasks must not start on a failed init (ring slot may be NULL).
+    bool cameraOk = cameraInit();
+    if (!cameraOk) {
         logCapture("[%s] CRITICAL: Camera init failed!\n", TAG);
         #ifdef INCLUDE_LED_CONTROL
         ledBlink(5, 200, 200);  // Error indicator
@@ -332,7 +364,7 @@ void setup() {
     wifiInit();
 
     // Start capture task
-    startCaptureTask();
+    if (cameraOk) startCaptureTask();
 
     // Start servers
     streamServerInit();
@@ -345,7 +377,7 @@ void setup() {
 
     // Start motion detection task
     #ifdef INCLUDE_MOTION_DETECT
-    motionDetectInit();
+    bool motionOk = cameraOk && motionDetectInit();
     // Apply the stored ROI mask, if any. Before this the mask written through
     // /api/roi was persisted and then never read by the detector.
     #ifdef INCLUDE_ZONES
@@ -366,8 +398,12 @@ void setup() {
     #ifdef INCLUDE_PERSON_DETECT
     motionDetectSetSemaphore(motionCascadeSem);
     #endif
-    xTaskCreatePinnedToCore(motionDetectTask, "motion", 6144, NULL, 3, NULL, 0);
-    logCapture("[%s] Motion detection task created\n", TAG);
+    if (motionOk) {
+        xTaskCreatePinnedToCore(motionDetectTask, "motion", 6144, NULL, 3, NULL, 0);
+        logCapture("[%s] Motion detection task created\n", TAG);
+    } else {
+        logCapture("[%s] Motion detection NOT started (camera or buffer init failed)\n", TAG);
+    }
     #endif
 
     // Start person detection task (FOMO + tracker, cascade from motion)

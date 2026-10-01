@@ -195,7 +195,10 @@ static String formatUptime() {
 }
 
 static uint32_t getFrameAgeMs() {
-    uint32_t last = getLastCaptureMs();
+    // Age of the last frame actually published to the ring (what streams and
+    // detectors can see), not of the last sensor grab: oversized or dropped frames
+    // advance lastCaptureMs but never reach a consumer.
+    uint32_t last = getLastPublishedMs();
     if (last == 0) return 0xFFFFFFFF;
     uint32_t now = millis();
     return now >= last ? (now - last) : 0;
@@ -469,6 +472,64 @@ static void handleApiStatus(AsyncWebServerRequest* request) {
     request->send(200, "application/json", buildStatusJson());
 }
 
+// API: GET /api/sensor[?reg=0xNNNN]
+// Read-only. Registers are sampled by the capture task (never here, SCCB is not
+// ours to touch); this handler only copies the cache. ?reg= queues a one-shot read
+// that the capture task services on its next frame. The handler cannot wait for it
+// without blocking the async server, so it answers at once with the last cached
+// one-shot result and "reg_pending":true; poll again to get the fresh value.
+static void handleApiSensor(AsyncWebServerRequest* request) {
+    bool wantReg = request->hasParam("reg");
+    if (wantReg) {
+        if (!requireAuth(request)) return;
+        String arg = request->getParam("reg")->value();
+        char* end = nullptr;
+        unsigned long r = strtoul(arg.c_str(), &end, 16);  // accepts "0x" prefix
+        if (arg.length() == 0 || arg.length() > 6 || *end != '\0' || r > 0xFFFF) {
+            request->send(400, "application/json",
+                          "{\"success\":false,\"message\":\"reg must be hex 0x0000-0xFFFF\"}");
+            return;
+        }
+        cameraSensorViewRequestReg((uint16_t)r);
+    }
+
+    SensorView v;
+    if (!cameraSensorViewGet(&v)) {
+        request->send(503, "application/json",
+                      "{\"success\":false,\"message\":\"no sensor sample yet\"}");
+        return;
+    }
+    char b[8];
+    JsonDocument doc;
+    doc["frame"] = v.frame;
+    doc["semantics_verified"] = false;
+    JsonObject id = doc["id"].to<JsonObject>();
+    snprintf(b, sizeof b, "0x%04X", v.pid);  id["pid"]  = String(b);
+    snprintf(b, sizeof b, "0x%02X", v.ver);  id["ver"]  = String(b);
+    snprintf(b, sizeof b, "0x%02X", v.midh); id["midh"] = String(b);
+    snprintf(b, sizeof b, "0x%02X", v.midl); id["midl"] = String(b);
+    JsonObject regs = doc["regs"].to<JsonObject>();
+    for (int i = 0; i < SENSOR_VIEW_REGS; i++) {
+        char k[8];
+        snprintf(k, sizeof k, "0x%04X", cameraSensorViewRegAddr(i));
+        if (v.regs[i] == 0xFFFF) { regs[k] = nullptr; }
+        else { snprintf(b, sizeof b, "0x%02X", v.regs[i]); regs[k] = String(b); }
+    }
+    if (wantReg || v.custom_set) {
+        JsonObject c = doc["reg"].to<JsonObject>();
+        snprintf(b, sizeof b, "0x%04X", v.custom_reg);
+        c["addr"] = String(b);
+        if (v.custom_set && v.custom_val != 0xFFFF) {
+            snprintf(b, sizeof b, "0x%02X", v.custom_val); c["value"] = String(b);
+        } else { c["value"] = nullptr; }
+        c["frame"] = v.custom_frame;
+        c["reg_pending"] = cameraSensorViewOneShotPending();
+    }
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+}
+
 // Largest JSON body we accept on a POST. The settings payload is a couple of kB;
 // the cap exists because `total` comes straight from a client-supplied
 // Content-Length, and malloc'ing that unbounded is a one-request OOM.
@@ -519,141 +580,150 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     bool needCameraApply = false;
     bool needSave = false;
 
+    // Keys present in the body but not applied (unknown name or wrong type) are
+    // reported back in `ignored`; `ok` records every key a branch below accepted.
+    JsonDocument appliedKeys;
+    auto ok = [&appliedKeys](const char* key, bool match) {
+        if (match) appliedKeys[key] = true;
+        return match;
+    };
+
     // Camera settings. Everything numeric is clamped to the range the sensor driver
     // and the detection buffers actually accept — these values arrive from the
     // network and used to be written through to the driver unchecked.
     int prevFrameSize = appConfig.camera.frame_size;
-    if (doc["frame_size"].is<int>())   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], FRAMESIZE_QVGA, FRAMESIZE_QSXGA); needCameraApply = true; }
-    if (doc["jpeg_quality"].is<int>()) { appConfig.camera.jpeg_quality = clampInt(doc["jpeg_quality"], 4, 63);  needCameraApply = true; }
-    if (doc["vflip"].is<bool>())       { appConfig.camera.vflip        = doc["vflip"];         needCameraApply = true; }
-    if (doc["hmirror"].is<bool>())     { appConfig.camera.hmirror      = doc["hmirror"];       needCameraApply = true; }
-    if (doc["brightness"].is<int>())   { appConfig.camera.brightness   = clampInt(doc["brightness"], -2, 2);    needCameraApply = true; }
-    if (doc["contrast"].is<int>())     { appConfig.camera.contrast     = clampInt(doc["contrast"], -2, 2);      needCameraApply = true; }
-    if (doc["saturation"].is<int>())   { appConfig.camera.saturation   = clampInt(doc["saturation"], -2, 2);    needCameraApply = true; }
-    if (doc["sharpness"].is<int>())    { appConfig.camera.sharpness    = clampInt(doc["sharpness"], -3, 3);     needCameraApply = true; }
-    if (doc["denoise"].is<int>())      { appConfig.camera.denoise      = clampInt(doc["denoise"], 0, 8);        needCameraApply = true; }
-    if (doc["ae_level"].is<int>())     { appConfig.camera.ae_level     = clampInt(doc["ae_level"], -2, 2);      needCameraApply = true; }
-    if (doc["aec_value"].is<int>())    { appConfig.camera.aec_value    = clampInt(doc["aec_value"], 0, 1200);   needCameraApply = true; }
-    if (doc["agc_gain"].is<int>())     { appConfig.camera.agc_gain     = clampInt(doc["agc_gain"], 0, 30);      needCameraApply = true; }
-    if (doc["gainceiling"].is<int>())  { appConfig.camera.gainceiling  = clampInt(doc["gainceiling"], 0, 6);    needCameraApply = true; }
-    if (doc["wb_mode"].is<int>())      { appConfig.camera.wb_mode      = clampInt(doc["wb_mode"], 0, 4);        needCameraApply = true; }
-    if (doc["aec"].is<bool>())         { appConfig.camera.aec          = doc["aec"];           needCameraApply = true; }
-    if (doc["agc"].is<bool>())         { appConfig.camera.agc          = doc["agc"];           needCameraApply = true; }
-    if (doc["awb"].is<bool>())         { appConfig.camera.awb          = doc["awb"];           needCameraApply = true; }
-    if (doc["bpc"].is<bool>())         { appConfig.camera.bpc          = doc["bpc"];           needCameraApply = true; }
-    if (doc["wpc"].is<bool>())         { appConfig.camera.wpc          = doc["wpc"];           needCameraApply = true; }
-    if (doc["raw_gma"].is<bool>())     { appConfig.camera.raw_gma     = doc["raw_gma"];       needCameraApply = true; }
-    if (doc["lenc"].is<bool>())        { appConfig.camera.lenc         = doc["lenc"];          needCameraApply = true; }
+    if (ok("frame_size", doc["frame_size"].is<int>()))   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], FRAMESIZE_QVGA, FRAMESIZE_UXGA); needCameraApply = true; }
+    if (ok("jpeg_quality", doc["jpeg_quality"].is<int>())) { appConfig.camera.jpeg_quality = clampInt(doc["jpeg_quality"], 4, 63);  needCameraApply = true; }
+    if (ok("vflip", doc["vflip"].is<bool>()))       { appConfig.camera.vflip        = doc["vflip"];         needCameraApply = true; }
+    if (ok("hmirror", doc["hmirror"].is<bool>()))     { appConfig.camera.hmirror      = doc["hmirror"];       needCameraApply = true; }
+    if (ok("brightness", doc["brightness"].is<int>()))   { appConfig.camera.brightness   = clampInt(doc["brightness"], -2, 2);    needCameraApply = true; }
+    if (ok("contrast", doc["contrast"].is<int>()))     { appConfig.camera.contrast     = clampInt(doc["contrast"], -2, 2);      needCameraApply = true; }
+    if (ok("saturation", doc["saturation"].is<int>()))   { appConfig.camera.saturation   = clampInt(doc["saturation"], -2, 2);    needCameraApply = true; }
+    if (ok("sharpness", doc["sharpness"].is<int>()))    { appConfig.camera.sharpness    = clampInt(doc["sharpness"], -3, 3);     needCameraApply = true; }
+    if (ok("denoise", doc["denoise"].is<int>()))      { appConfig.camera.denoise      = clampInt(doc["denoise"], 0, 8);        needCameraApply = true; }
+    if (ok("ae_level", doc["ae_level"].is<int>()))     { appConfig.camera.ae_level     = clampInt(doc["ae_level"], -2, 2);      needCameraApply = true; }
+    if (ok("aec_value", doc["aec_value"].is<int>()))    { appConfig.camera.aec_value    = clampInt(doc["aec_value"], 0, 1200);   needCameraApply = true; }
+    if (ok("agc_gain", doc["agc_gain"].is<int>()))     { appConfig.camera.agc_gain     = clampInt(doc["agc_gain"], 0, 30);      needCameraApply = true; }
+    if (ok("gainceiling", doc["gainceiling"].is<int>()))  { appConfig.camera.gainceiling  = clampInt(doc["gainceiling"], 0, 6);    needCameraApply = true; }
+    if (ok("wb_mode", doc["wb_mode"].is<int>()))      { appConfig.camera.wb_mode      = clampInt(doc["wb_mode"], 0, 4);        needCameraApply = true; }
+    if (ok("aec2", doc["aec2"].is<bool>()))            { appConfig.camera.aec2         = doc["aec2"];          needCameraApply = true; }
+    if (ok("aec", doc["aec"].is<bool>()))         { appConfig.camera.aec          = doc["aec"];           needCameraApply = true; }
+    if (ok("agc", doc["agc"].is<bool>()))         { appConfig.camera.agc          = doc["agc"];           needCameraApply = true; }
+    if (ok("awb", doc["awb"].is<bool>()))         { appConfig.camera.awb          = doc["awb"];           needCameraApply = true; }
+    if (ok("bpc", doc["bpc"].is<bool>()))         { appConfig.camera.bpc          = doc["bpc"];           needCameraApply = true; }
+    if (ok("wpc", doc["wpc"].is<bool>()))         { appConfig.camera.wpc          = doc["wpc"];           needCameraApply = true; }
+    if (ok("raw_gma", doc["raw_gma"].is<bool>()))     { appConfig.camera.raw_gma     = doc["raw_gma"];       needCameraApply = true; }
+    if (ok("lenc", doc["lenc"].is<bool>()))        { appConfig.camera.lenc         = doc["lenc"];          needCameraApply = true; }
 
     // Motion settings
-    if (doc["motion_enabled"].is<bool>())          { appConfig.motion.enabled          = doc["motion_enabled"];          needSave = true; }
-    if (doc["motion_detection_enabled"].is<bool>()) { appConfig.motion.enabled         = doc["motion_detection_enabled"]; needSave = true; }
-    if (doc["motion_threshold"].is<int>())         { appConfig.motion.threshold        = clampInt(doc["motion_threshold"], 5, 80);        needSave = true; }
-    if (doc["motion_cooldown"].is<int>())          { appConfig.motion.cooldown_sec     = clampInt(doc["motion_cooldown"], 0, 3600);       needSave = true; }
-    if (doc["motion_telegram_cooldown"].is<int>()) { appConfig.motion.cooldown_sec     = clampInt(doc["motion_telegram_cooldown"], 0, 3600); needSave = true; }
-    if (doc["motion_min_area"].is<int>())          { appConfig.motion.min_area_pct     = clampInt(doc["motion_min_area"], 1, 100);        needSave = true; }
+    if (ok("motion_enabled", doc["motion_enabled"].is<bool>()))          { appConfig.motion.enabled          = doc["motion_enabled"];          needSave = true; }
+    if (ok("motion_detection_enabled", doc["motion_detection_enabled"].is<bool>())) { appConfig.motion.enabled         = doc["motion_detection_enabled"]; needSave = true; }
+    if (ok("motion_threshold", doc["motion_threshold"].is<int>()))         { appConfig.motion.threshold        = clampInt(doc["motion_threshold"], 5, 80);        needSave = true; }
+    if (ok("motion_cooldown", doc["motion_cooldown"].is<int>()))          { appConfig.motion.cooldown_sec     = clampInt(doc["motion_cooldown"], 0, 3600);       needSave = true; }
+    if (ok("motion_telegram_cooldown", doc["motion_telegram_cooldown"].is<int>())) { appConfig.motion.cooldown_sec     = clampInt(doc["motion_telegram_cooldown"], 0, 3600); needSave = true; }
+    if (ok("motion_min_area", doc["motion_min_area"].is<int>()))          { appConfig.motion.min_area_pct     = clampInt(doc["motion_min_area"], 1, 100);        needSave = true; }
     // Upper reject: above this share of changed blocks the frame is treated as a
     // global lighting change. 100 effectively disables the reject; the old code
     // clamped to the 50 % default, so the value could never be raised at all.
-    if (doc["motion_max_area"].is<int>())          { appConfig.motion.max_area_pct     = clampInt(doc["motion_max_area"], 10, 100);       needSave = true; }
-    if (doc["motion_temporal_filter"].is<bool>())  { appConfig.motion.temporal_filter  = doc["motion_temporal_filter"];  needSave = true; }
-    if (doc["motion_spatial_filter"].is<bool>())   { appConfig.motion.spatial_filter   = doc["motion_spatial_filter"];   needSave = true; }
-    if (doc["motion_night_suppress"].is<bool>())   { appConfig.motion.night_suppress   = doc["motion_night_suppress"];   needSave = true; }
-    if (doc["motion_save_sd"].is<bool>())          { appConfig.motion.save_to_sd       = doc["motion_save_sd"];          needSave = true; }
+    if (ok("motion_max_area", doc["motion_max_area"].is<int>()))          { appConfig.motion.max_area_pct     = clampInt(doc["motion_max_area"], 10, 100);       needSave = true; }
+    if (ok("motion_temporal_filter", doc["motion_temporal_filter"].is<bool>()))  { appConfig.motion.temporal_filter  = doc["motion_temporal_filter"];  needSave = true; }
+    if (ok("motion_spatial_filter", doc["motion_spatial_filter"].is<bool>()))   { appConfig.motion.spatial_filter   = doc["motion_spatial_filter"];   needSave = true; }
+    if (ok("motion_night_suppress", doc["motion_night_suppress"].is<bool>()))   { appConfig.motion.night_suppress   = doc["motion_night_suppress"];   needSave = true; }
+    if (ok("motion_save_sd", doc["motion_save_sd"].is<bool>()))          { appConfig.motion.save_to_sd       = doc["motion_save_sd"];          needSave = true; }
     // Expert knobs: persisted since day one but previously only reachable by hand-
     // editing /config.json.
-    if (doc["motion_ema_alpha_day"].is<float>())   { appConfig.motion.ema_alpha_day    = clampFloat(doc["motion_ema_alpha_day"], 0.50f, 0.999f);   needSave = true; }
-    if (doc["motion_ema_alpha_night"].is<float>()) { appConfig.motion.ema_alpha_night  = clampFloat(doc["motion_ema_alpha_night"], 0.50f, 0.999f); needSave = true; }
-    if (doc["motion_training_frames"].is<int>())   { appConfig.motion.training_frames  = clampInt(doc["motion_training_frames"], 1, 120);  needSave = true; }
-    if (doc["motion_agc_gain_factor"].is<float>()) { appConfig.motion.agc_gain_factor  = clampFloat(doc["motion_agc_gain_factor"], 0.0f, 4.0f); needSave = true; }
-    if (doc["motion_brightness_min"].is<int>())    { appConfig.motion.brightness_min   = clampInt(doc["motion_brightness_min"], 0, 128);   needSave = true; }
+    if (ok("motion_ema_alpha_day", doc["motion_ema_alpha_day"].is<float>()))   { appConfig.motion.ema_alpha_day    = clampFloat(doc["motion_ema_alpha_day"], 0.50f, 0.999f);   needSave = true; }
+    if (ok("motion_ema_alpha_night", doc["motion_ema_alpha_night"].is<float>())) { appConfig.motion.ema_alpha_night  = clampFloat(doc["motion_ema_alpha_night"], 0.50f, 0.999f); needSave = true; }
+    if (ok("motion_training_frames", doc["motion_training_frames"].is<int>()))   { appConfig.motion.training_frames  = clampInt(doc["motion_training_frames"], 1, 120);  needSave = true; }
+    if (ok("motion_agc_gain_factor", doc["motion_agc_gain_factor"].is<float>())) { appConfig.motion.agc_gain_factor  = clampFloat(doc["motion_agc_gain_factor"], 0.0f, 4.0f); needSave = true; }
+    if (ok("motion_brightness_min", doc["motion_brightness_min"].is<int>()))    { appConfig.motion.brightness_min   = clampInt(doc["motion_brightness_min"], 0, 128);   needSave = true; }
 
     // Face detection settings
-    if (doc["face_detect_enabled"].is<bool>())     { appConfig.face_detect.enabled         = doc["face_detect_enabled"];     needSave = true; }
-    if (doc["face_detect_two_stage"].is<bool>())   { appConfig.face_detect.two_stage       = doc["face_detect_two_stage"];   needSave = true; }
-    if (doc["face_detect_cooldown"].is<int>())     { appConfig.face_detect.cooldown_sec    = clampInt(doc["face_detect_cooldown"], 0, 3600); needSave = true; }
-    if (doc["face_detect_save_sd"].is<bool>())     { appConfig.face_detect.save_to_sd      = doc["face_detect_save_sd"];     needSave = true; }
-    if (doc["face_score_threshold"].is<float>())   { appConfig.face_detect.score_threshold = clampFloat(doc["face_score_threshold"], 0.05f, 0.99f); needSave = true; }
-    if (doc["face_nms_threshold"].is<float>())     { appConfig.face_detect.nms_threshold   = clampFloat(doc["face_nms_threshold"], 0.05f, 0.99f);   needSave = true; }
+    if (ok("face_detect_enabled", doc["face_detect_enabled"].is<bool>()))     { appConfig.face_detect.enabled         = doc["face_detect_enabled"];     needSave = true; }
+    if (ok("face_detect_two_stage", doc["face_detect_two_stage"].is<bool>()))   { appConfig.face_detect.two_stage       = doc["face_detect_two_stage"];   needSave = true; }
+    if (ok("face_detect_cooldown", doc["face_detect_cooldown"].is<int>()))     { appConfig.face_detect.cooldown_sec    = clampInt(doc["face_detect_cooldown"], 0, 3600); needSave = true; }
+    if (ok("face_detect_save_sd", doc["face_detect_save_sd"].is<bool>()))     { appConfig.face_detect.save_to_sd      = doc["face_detect_save_sd"];     needSave = true; }
+    if (ok("face_score_threshold", doc["face_score_threshold"].is<float>()))   { appConfig.face_detect.score_threshold = clampFloat(doc["face_score_threshold"], 0.05f, 0.99f); needSave = true; }
+    if (ok("face_nms_threshold", doc["face_nms_threshold"].is<float>()))     { appConfig.face_detect.nms_threshold   = clampFloat(doc["face_nms_threshold"], 0.05f, 0.99f);   needSave = true; }
 
     // Person detection
-    if (doc["person_detect_enabled"].is<bool>())       { appConfig.person_detect.enabled              = doc["person_detect_enabled"];       needSave = true; }
-    if (doc["person_detection_enabled"].is<bool>())    { appConfig.person_detect.enabled              = doc["person_detection_enabled"];    needSave = true; }
-    if (doc["person_detect_confidence"].is<float>())   { appConfig.person_detect.confidence_threshold  = clampFloat(doc["person_detect_confidence"], 0.05f, 0.99f);   needSave = true; }
-    if (doc["person_confidence_threshold"].is<float>()) { appConfig.person_detect.confidence_threshold = clampFloat(doc["person_confidence_threshold"], 0.05f, 0.99f); needSave = true; }
-    if (doc["person_confident_threshold"].is<float>()) { appConfig.person_detect.confident_threshold   = clampFloat(doc["person_confident_threshold"], 0.05f, 1.0f);  needSave = true; }
-    if (doc["person_detect_temporal"].is<int>())       { appConfig.person_detect.temporal_frames       = clampInt(doc["person_detect_temporal"], 1, 10);   needSave = true; }
-    if (doc["person_recheck_interval"].is<int>())      { appConfig.person_detect.temporal_frames       = clampInt(doc["person_recheck_interval"], 1, 10);  needSave = true; }
-    if (doc["person_detect_cooldown"].is<int>())       { appConfig.person_detect.cooldown_sec          = clampInt(doc["person_detect_cooldown"], 0, 3600); needSave = true; }
-    if (doc["person_detection_cooldown"].is<int>())    { appConfig.person_detect.cooldown_sec          = clampInt(doc["person_detection_cooldown"], 0, 3600); needSave = true; }
-    if (doc["person_detect_save_sd"].is<bool>())       { appConfig.person_detect.save_to_sd            = doc["person_detect_save_sd"];       needSave = true; }
+    if (ok("person_detect_enabled", doc["person_detect_enabled"].is<bool>()))       { appConfig.person_detect.enabled              = doc["person_detect_enabled"];       needSave = true; }
+    if (ok("person_detection_enabled", doc["person_detection_enabled"].is<bool>()))    { appConfig.person_detect.enabled              = doc["person_detection_enabled"];    needSave = true; }
+    if (ok("person_detect_confidence", doc["person_detect_confidence"].is<float>()))   { appConfig.person_detect.confidence_threshold  = clampFloat(doc["person_detect_confidence"], 0.05f, 0.99f);   needSave = true; }
+    if (ok("person_confidence_threshold", doc["person_confidence_threshold"].is<float>())) { appConfig.person_detect.confidence_threshold = clampFloat(doc["person_confidence_threshold"], 0.05f, 0.99f); needSave = true; }
+    if (ok("person_confident_threshold", doc["person_confident_threshold"].is<float>())) { appConfig.person_detect.confident_threshold   = clampFloat(doc["person_confident_threshold"], 0.05f, 1.0f);  needSave = true; }
+    if (ok("person_detect_temporal", doc["person_detect_temporal"].is<int>()))       { appConfig.person_detect.temporal_frames       = clampInt(doc["person_detect_temporal"], 1, 10);   needSave = true; }
+    if (ok("person_recheck_interval", doc["person_recheck_interval"].is<int>()))      { appConfig.person_detect.temporal_frames       = clampInt(doc["person_recheck_interval"], 1, 10);  needSave = true; }
+    if (ok("person_detect_cooldown", doc["person_detect_cooldown"].is<int>()))       { appConfig.person_detect.cooldown_sec          = clampInt(doc["person_detect_cooldown"], 0, 3600); needSave = true; }
+    if (ok("person_detection_cooldown", doc["person_detection_cooldown"].is<int>()))    { appConfig.person_detect.cooldown_sec          = clampInt(doc["person_detection_cooldown"], 0, 3600); needSave = true; }
+    if (ok("person_detect_save_sd", doc["person_detect_save_sd"].is<bool>()))       { appConfig.person_detect.save_to_sd            = doc["person_detect_save_sd"];       needSave = true; }
 
     // Tracker (person detection track lifecycle)
-    if (doc["tracker_confirm_hits"].is<int>()) { appConfig.tracker.confirm_hits = clampInt(doc["tracker_confirm_hits"], 1, 10);  needSave = true; }
-    if (doc["tracker_max_misses"].is<int>())   { appConfig.tracker.max_misses   = clampInt(doc["tracker_max_misses"], 1, 30);    needSave = true; }
-    if (doc["tracker_match_dist"].is<int>())   { appConfig.tracker.match_dist   = clampInt(doc["tracker_match_dist"], 5, 200);   needSave = true; }
+    if (ok("tracker_confirm_hits", doc["tracker_confirm_hits"].is<int>())) { appConfig.tracker.confirm_hits = clampInt(doc["tracker_confirm_hits"], 1, 10);  needSave = true; }
+    if (ok("tracker_max_misses", doc["tracker_max_misses"].is<int>()))   { appConfig.tracker.max_misses   = clampInt(doc["tracker_max_misses"], 1, 30);    needSave = true; }
+    if (ok("tracker_match_dist", doc["tracker_match_dist"].is<int>()))   { appConfig.tracker.match_dist   = clampInt(doc["tracker_match_dist"], 5, 200);   needSave = true; }
 
     // Timelapse
-    if (doc["timelapse_enabled"].is<bool>()) { appConfig.timelapse.enabled      = doc["timelapse_enabled"];  needSave = true; }
-    if (doc["timelapse_interval"].is<int>()) { appConfig.timelapse.interval_sec = clampInt(doc["timelapse_interval"], 1, 86400); needSave = true; }
-    if (doc["timelapse_save_sd"].is<bool>()) { appConfig.timelapse.save_to_sd   = doc["timelapse_save_sd"];  needSave = true; }
+    if (ok("timelapse_enabled", doc["timelapse_enabled"].is<bool>())) { appConfig.timelapse.enabled      = doc["timelapse_enabled"];  needSave = true; }
+    if (ok("timelapse_interval", doc["timelapse_interval"].is<int>())) { appConfig.timelapse.interval_sec = clampInt(doc["timelapse_interval"], 1, 86400); needSave = true; }
+    if (ok("timelapse_save_sd", doc["timelapse_save_sd"].is<bool>())) { appConfig.timelapse.save_to_sd   = doc["timelapse_save_sd"];  needSave = true; }
 
     // MQTT
-    if (doc["mqtt_enabled"].is<bool>())        { appConfig.mqtt.enabled      = doc["mqtt_enabled"];      needSave = true; }
+    if (ok("mqtt_enabled", doc["mqtt_enabled"].is<bool>()))        { appConfig.mqtt.enabled      = doc["mqtt_enabled"];      needSave = true; }
     // Same "empty = unchanged" rule: a blank field on the settings page must not
     // silently disconnect the broker.
-    if (doc["mqtt_server"].is<const char*>()) {
+    if (ok("mqtt_server", doc["mqtt_server"].is<const char*>())) {
         String srv = doc["mqtt_server"].as<String>();
         if (srv.length() > 0) { appConfig.mqtt.server = srv; needSave = true; }
     }
-    if (doc["mqtt_port"].is<int>())             { appConfig.mqtt.port         = clampInt(doc["mqtt_port"], 1, 65535); needSave = true; }
-    if (doc["mqtt_topic_prefix"].is<const char*>()) { appConfig.mqtt.topic_prefix = doc["mqtt_topic_prefix"].as<String>(); needSave = true; }
-    if (doc["mqtt_tls_enabled"].is<bool>())     { appConfig.mqtt.tls_enabled  = doc["mqtt_tls_enabled"];  needSave = true; }
+    if (ok("mqtt_port", doc["mqtt_port"].is<int>()))             { appConfig.mqtt.port         = clampInt(doc["mqtt_port"], 1, 65535); needSave = true; }
+    if (ok("mqtt_topic_prefix", doc["mqtt_topic_prefix"].is<const char*>())) { appConfig.mqtt.topic_prefix = doc["mqtt_topic_prefix"].as<String>(); needSave = true; }
+    if (ok("mqtt_tls_enabled", doc["mqtt_tls_enabled"].is<bool>()))     { appConfig.mqtt.tls_enabled  = doc["mqtt_tls_enabled"];  needSave = true; }
     // Broker credentials live in encrypted NVS like the other secrets; without
     // these keys an authenticated broker was simply unusable from the UI.
-    if (doc["mqtt_user"].is<const char*>()) {
+    if (ok("mqtt_user", doc["mqtt_user"].is<const char*>())) {
         String u = doc["mqtt_user"].as<String>();
         if (u.length() > 0) { appConfig.mqtt.user = u; saveSecretsToNVS(); }
     }
-    if (doc["mqtt_pass"].is<const char*>()) {
+    if (ok("mqtt_pass", doc["mqtt_pass"].is<const char*>())) {
         String p = doc["mqtt_pass"].as<String>();
         if (p.length() > 0) { appConfig.mqtt.password = p; saveSecretsToNVS(); }
     }
 
     // Network identity
-    if (doc["hostname"].is<const char*>()) {
+    if (ok("hostname", doc["hostname"].is<const char*>())) {
         String h = doc["hostname"].as<String>();
         if (h.length() > 0 && h.length() <= 32) { appConfig.wifi.hostname = h; needSave = true; }
     }
 
     // Telegram
-    if (doc["telegram_enabled"].is<bool>())           { appConfig.telegram.enabled           = doc["telegram_enabled"];           needSave = true; }
-    if (doc["telegram_notify_on_motion"].is<bool>())  { appConfig.telegram.notify_on_motion  = doc["telegram_notify_on_motion"];  needSave = true; }
-    if (doc["telegram_notify_on_face"].is<bool>())    { appConfig.telegram.notify_on_face    = doc["telegram_notify_on_face"];    needSave = true; }
-    if (doc["telegram_photo_on_motion"].is<bool>())   { appConfig.telegram.photo_on_motion   = doc["telegram_photo_on_motion"];   needSave = true; }
-    if (doc["motion_telegram_photo"].is<bool>())      { appConfig.telegram.photo_on_motion   = doc["motion_telegram_photo"];      needSave = true; }
-    if (doc["telegram_photo_on_face"].is<bool>())     { appConfig.telegram.photo_on_face     = doc["telegram_photo_on_face"];     needSave = true; }
-    if (doc["telegram_notify_on_person"].is<bool>())  { appConfig.telegram.notify_on_person  = doc["telegram_notify_on_person"];  needSave = true; }
-    if (doc["telegram_photo_on_person"].is<bool>())   { appConfig.telegram.photo_on_person   = doc["telegram_photo_on_person"];   needSave = true; }
-    if (doc["person_telegram_photo"].is<bool>())      { appConfig.telegram.photo_on_person   = doc["person_telegram_photo"];      needSave = true; }
-    if (doc["telegram_cooldown"].is<int>())           { appConfig.telegram.cooldown_sec      = doc["telegram_cooldown"];          needSave = true; }
-    if (doc["telegram_active_start"].is<int>())       { appConfig.telegram.active_start_hour = doc["telegram_active_start"];      needSave = true; }
-    if (doc["telegram_active_end"].is<int>())         { appConfig.telegram.active_end_hour   = doc["telegram_active_end"];        needSave = true; }
-    if (doc["motion_notify_start_hour"].is<int>())    { appConfig.telegram.active_start_hour = doc["motion_notify_start_hour"];   needSave = true; }
-    if (doc["motion_notify_end_hour"].is<int>())      { appConfig.telegram.active_end_hour   = doc["motion_notify_end_hour"];     needSave = true; }
-    if (doc["telegram_poll_interval"].is<int>())      { appConfig.telegram.poll_interval_ms  = doc["telegram_poll_interval"];     needSave = true; }
+    if (ok("telegram_enabled", doc["telegram_enabled"].is<bool>()))           { appConfig.telegram.enabled           = doc["telegram_enabled"];           needSave = true; }
+    if (ok("telegram_notify_on_motion", doc["telegram_notify_on_motion"].is<bool>()))  { appConfig.telegram.notify_on_motion  = doc["telegram_notify_on_motion"];  needSave = true; }
+    if (ok("telegram_notify_on_face", doc["telegram_notify_on_face"].is<bool>()))    { appConfig.telegram.notify_on_face    = doc["telegram_notify_on_face"];    needSave = true; }
+    if (ok("telegram_photo_on_motion", doc["telegram_photo_on_motion"].is<bool>()))   { appConfig.telegram.photo_on_motion   = doc["telegram_photo_on_motion"];   needSave = true; }
+    if (ok("motion_telegram_photo", doc["motion_telegram_photo"].is<bool>()))      { appConfig.telegram.photo_on_motion   = doc["motion_telegram_photo"];      needSave = true; }
+    if (ok("telegram_photo_on_face", doc["telegram_photo_on_face"].is<bool>()))     { appConfig.telegram.photo_on_face     = doc["telegram_photo_on_face"];     needSave = true; }
+    if (ok("telegram_notify_on_person", doc["telegram_notify_on_person"].is<bool>()))  { appConfig.telegram.notify_on_person  = doc["telegram_notify_on_person"];  needSave = true; }
+    if (ok("telegram_photo_on_person", doc["telegram_photo_on_person"].is<bool>()))   { appConfig.telegram.photo_on_person   = doc["telegram_photo_on_person"];   needSave = true; }
+    if (ok("person_telegram_photo", doc["person_telegram_photo"].is<bool>()))      { appConfig.telegram.photo_on_person   = doc["person_telegram_photo"];      needSave = true; }
+    if (ok("telegram_cooldown", doc["telegram_cooldown"].is<int>()))           { appConfig.telegram.cooldown_sec      = doc["telegram_cooldown"];          needSave = true; }
+    if (ok("telegram_active_start", doc["telegram_active_start"].is<int>()))       { appConfig.telegram.active_start_hour = doc["telegram_active_start"];      needSave = true; }
+    if (ok("telegram_active_end", doc["telegram_active_end"].is<int>()))         { appConfig.telegram.active_end_hour   = doc["telegram_active_end"];        needSave = true; }
+    if (ok("motion_notify_start_hour", doc["motion_notify_start_hour"].is<int>()))    { appConfig.telegram.active_start_hour = doc["motion_notify_start_hour"];   needSave = true; }
+    if (ok("motion_notify_end_hour", doc["motion_notify_end_hour"].is<int>()))      { appConfig.telegram.active_end_hour   = doc["motion_notify_end_hour"];     needSave = true; }
+    if (ok("telegram_poll_interval", doc["telegram_poll_interval"].is<int>()))      { appConfig.telegram.poll_interval_ms  = doc["telegram_poll_interval"];     needSave = true; }
     // Secrets follow the same "empty means leave unchanged" rule as http_pass.
     // The settings page posts every field on every save, so treating "" as a value
     // wiped the bot token and chat id whenever anyone touched an unrelated slider.
     // Clearing is done through POST /api/secrets/clear?target=telegram.
-    if (doc["telegram_bot_token"].is<const char*>())  {
+    if (ok("telegram_bot_token", doc["telegram_bot_token"].is<const char*>()))  {
         String t = doc["telegram_bot_token"].as<String>();
         if (t.length() > 0) {
             appConfig.telegram.bot_token = t;
             saveSecretsToNVS();
         }
     }
-    if (doc["telegram_chat_id"].is<const char*>())    {
+    if (ok("telegram_chat_id", doc["telegram_chat_id"].is<const char*>()))    {
         String c = doc["telegram_chat_id"].as<String>();
         if (c.length() > 0) {
             appConfig.telegram.chat_id = c;
@@ -662,14 +732,14 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     }
 
     // Auth (HTTP user/password). Password change persists to NVS immediately.
-    if (doc["http_user"].is<const char*>()) {
+    if (ok("http_user", doc["http_user"].is<const char*>())) {
         String u = doc["http_user"].as<String>();
         if (u.length() > 0 && u.length() <= 32) {
             appConfig.auth.http_user = u;
             needSave = true;
         }
     }
-    if (doc["http_pass"].is<const char*>()) {
+    if (ok("http_pass", doc["http_pass"].is<const char*>())) {
         String p = doc["http_pass"].as<String>();
         // Empty field = leave unchanged. Minimum 4 chars to prevent trivial passwords.
         if (p.length() >= 4 && p.length() <= 64) {
@@ -679,11 +749,11 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     }
 
     // LED
-    if (doc["led_enabled"].is<bool>()) { appConfig.led_enabled = doc["led_enabled"]; needSave = true; }
+    if (ok("led_enabled", doc["led_enabled"].is<bool>())) { appConfig.led_enabled = doc["led_enabled"]; needSave = true; }
 
     // Frame rates
-    if (doc["idle_fps"].is<int>())   { appConfig.idle_fps   = doc["idle_fps"];   needSave = true; }
-    if (doc["active_fps"].is<int>()) { appConfig.active_fps = doc["active_fps"]; needSave = true; }
+    if (ok("idle_fps", doc["idle_fps"].is<int>()))   { appConfig.idle_fps   = doc["idle_fps"];   needSave = true; }
+    if (ok("active_fps", doc["active_fps"].is<int>())) { appConfig.active_fps = doc["active_fps"]; needSave = true; }
 
     // Sensor writes are handed to the capture task instead of being done here — the
     // async server task must not touch SCCB while a frame grab is in flight.
@@ -703,10 +773,17 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         saveConfig();
     }
 
-    request->send(200, "application/json",
-                  frameSizeChanged
-                      ? "{\"success\":true,\"message\":\"Settings applied, camera restarting\",\"camera_restart\":true}"
-                      : "{\"success\":true,\"message\":\"Settings applied\"}");
+    JsonDocument resp;
+    resp["success"] = true;
+    resp["message"] = frameSizeChanged ? "Settings applied, camera restarting" : "Settings applied";
+    if (frameSizeChanged) resp["camera_restart"] = true;
+    JsonArray ignored = resp["ignored"].to<JsonArray>();
+    for (JsonPair kv : doc.as<JsonObject>()) {
+        if (!appliedKeys[kv.key()].is<bool>()) ignored.add(kv.key().c_str());
+    }
+    String respOut;
+    serializeJson(resp, respOut);
+    request->send(200, "application/json", respOut);
 
     // Notify WebSocket clients
     ws.textAll(buildStatusJson());
@@ -1165,6 +1242,13 @@ static void handleCompatJson(AsyncWebServerRequest* request) {
 static void handleHealth(AsyncWebServerRequest* request) {
     JsonDocument doc;
 
+    // "Dropping frames" = the counter grew since the previous /health poll, so a
+    // long-ago burst does not mark the device degraded forever.
+    static uint32_t healthLastDropped = 0;
+    static uint32_t healthPrevSeen = 0;
+    healthLastDropped = healthPrevSeen;
+    healthPrevSeen = getRingDroppedFrames();
+
     uint32_t uptimeSec = millis() / 1000;
     uint32_t freeHeap  = ESP.getFreeHeap();
     uint32_t frameAge  = getFrameAgeMs();
@@ -1180,7 +1264,10 @@ static void handleHealth(AsyncWebServerRequest* request) {
     if (!isWiFiConnected())              addIssue("wifi down");
     if (getCaptureCount() == 0)          addIssue("no frame captured since boot");
     else if (frameAge > 10000)           addIssue("stale frame (>10s)");
-    if (getCaptureFps() < 0.1f)          addIssue("capture stalled");
+    // getCaptureFps() is 0 until the first FPS window completes, so skip the check
+    // for the first seconds after boot/reinit (a fresh frame proves capture is alive).
+    if (getCaptureFps() < 0.1f && millis() > 5000 && frameAge > 3000) addIssue("capture stalled");
+    if (getRingDroppedFrames() > healthLastDropped) addIssue("frames being dropped");
     if (freeHeap < 40 * 1024)            addIssue("low heap");
     #ifdef INCLUDE_SD_CARD
     if (sdStoreDisabled())               addIssue("sd writes disabled");
@@ -1201,6 +1288,8 @@ static void handleHealth(AsyncWebServerRequest* request) {
     doc["capture_fps"] = getCaptureFps();
     doc["capture_errors"] = getCaptureErrors();
     doc["ring_dropped"] = getRingDroppedFrames();
+    doc["ring_oversize"] = getOversizeDroppedFrames();
+    doc["device_name"] = appConfig.wifi.hostname;   // A12 derives esp32cam/<device>/... from it
     doc["frame_age_ms"] = frameAge;
     doc["stream_clients"] = getStreamClientCount();
     doc["detection_clients"] = getDetectionStreamClientCount();
@@ -1420,6 +1509,7 @@ static void setupApiRoutes() {
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     server.on("/api/status", HTTP_GET, handleApiStatus);
+    server.on("/api/sensor", HTTP_GET, handleApiSensor);
     server.on("/api/snapshot", HTTP_GET, handleApiSnapshot);
     server.on("/api/wifi/scan", HTTP_GET, handleApiWifiScan);
     server.on("/api/csrf", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -1428,6 +1518,9 @@ static void setupApiRoutes() {
         request->send(200, "application/json", body);
     });
     server.on("/api/reboot", HTTP_POST, handleApiReboot);
+    // Legacy alias used by the A12 companion; same exemption as /settings and
+    // /ir-control (non-/api/ path: no token needed unless the request is browser-originated).
+    server.on("/reboot", HTTP_POST, handleApiReboot);
     server.on("/api/reset", HTTP_POST, handleApiReset);
     server.on("/api/camera/reinit", HTTP_POST, handleApiCameraReinit);
     server.on("/api/secrets/clear", HTTP_POST, handleApiSecretsClear);

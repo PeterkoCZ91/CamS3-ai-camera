@@ -121,8 +121,31 @@ static bool prevMotion = false;
 static bool prevPerson = false;
 static bool prevFace = false;
 
+// Topics/discovery ids come from user-editable config; wildcards, spaces or a
+// trailing '/' would make invalid or colliding topics, so normalise here.
 static String topicBase() {
-    return appConfig.mqtt.topic_prefix;
+    String in = appConfig.mqtt.topic_prefix;
+    String out;
+    for (size_t i = 0; i < in.length(); i++) {
+        char c = in[i];
+        bool ok = isalnum((unsigned char)c) || c == '.' || c == '_' || c == '-' || c == '/';
+        out += ok ? c : '_';
+    }
+    while (out.startsWith("/")) out.remove(0, 1);
+    while (out.endsWith("/")) out.remove(out.length() - 1);
+    if (out.length() == 0) return String("cams3");
+    return out;
+}
+
+static String safeHostname() {
+    String in = appConfig.wifi.hostname;
+    String out;
+    for (size_t i = 0; i < in.length(); i++) {
+        char c = in[i];
+        out += (isalnum((unsigned char)c) || c == '_' || c == '-') ? c : '_';
+    }
+    if (out.length() == 0) return String("cams3");
+    return out;
 }
 
 static String availabilityTopic() {
@@ -184,8 +207,22 @@ static void mqttHandlePendingConfig() {
 
 // --- Home Assistant MQTT Discovery ---
 
+// Serialize + publish one discovery doc; skip (and log) instead of sending cut-off
+// JSON when it would not fit the scratch buffer / MQTT client buffer.
+static void publishDiscoveryDoc(const String& topic, JsonDocument& doc) {
+    char payload[768];
+    size_t need = measureJson(doc);
+    if (need >= sizeof(payload) || need + topic.length() + 16 > 1024) {
+        logCapture("[%s] Discovery payload too large (%u B), skipped: %s\n",
+                   TAG, (unsigned)need, topic.c_str());
+        return;
+    }
+    serializeJson(doc, payload, sizeof(payload));
+    mqttClient.publish(topic.c_str(), payload, true, 1);
+}
+
 static void publishDiscovery() {
-    String deviceId = appConfig.wifi.hostname;
+    String deviceId = safeHostname();
     String deviceName = DEVICE_NAME;
 
     // Device block (shared across all entities)
@@ -213,9 +250,7 @@ static void publishDiscovery() {
         dev["connections"][0][0] = "mac";
         dev["connections"][0][1] = WiFi.macAddress();
 
-        char payload[512];
-        serializeJson(doc, payload, sizeof(payload));
-        mqttClient.publish(topic.c_str(), payload, true, 1);
+        publishDiscoveryDoc(topic, doc);
     }
 
     // Person binary sensor
@@ -236,9 +271,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        char payload[512];
-        serializeJson(doc, payload, sizeof(payload));
-        mqttClient.publish(topic.c_str(), payload, true, 1);
+        publishDiscoveryDoc(topic, doc);
     }
 
     // Face binary sensor
@@ -258,9 +291,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        char payload[512];
-        serializeJson(doc, payload, sizeof(payload));
-        mqttClient.publish(topic.c_str(), payload, true, 1);
+        publishDiscoveryDoc(topic, doc);
     }
 
     // Status sensor (uptime as primary value, full JSON available as attributes)
@@ -282,9 +313,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        char payload[512];
-        serializeJson(doc, payload, sizeof(payload));
-        mqttClient.publish(topic.c_str(), payload, true, 1);
+        publishDiscoveryDoc(topic, doc);
     }
 
     // Diagnostic sensors extracted from the /status JSON via value_template.
@@ -324,9 +353,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        char payload[512];
-        serializeJson(doc, payload, sizeof(payload));
-        mqttClient.publish(topic.c_str(), payload, true, 1);
+        publishDiscoveryDoc(topic, doc);
     }
 
     logCapture("[%s] HA discovery payloads published\n", TAG);
@@ -355,7 +382,7 @@ static bool mqttConnect() {
     // LWT: broker marks us offline if the connection drops unexpectedly.
     mqttClient.setWill(availabilityTopic().c_str(), "offline", true, 1);
 
-    String clientId = appConfig.wifi.hostname;
+    String clientId = safeHostname();
     bool ok;
     if (appConfig.mqtt.user.length() > 0) {
         ok = mqttClient.connect(clientId.c_str(),
@@ -430,10 +457,33 @@ void mqttPublishPerson(bool detected, int count) {
     mqttPublishOrQueue(attrTopic.c_str(), attrBuf, true, 0);
 }
 
+// Called from the person-detection task. MQTTClient is not thread-safe, so only
+// stash the values here; mqttTask does the actual publish (latest value wins).
+static portMUX_TYPE uncertainMux = portMUX_INITIALIZER_UNLOCKED;
+static bool  pendingUncertain = false;
+static float pendingUncertainConf = 0;
+static int   pendingUncertainTracks = 0;
+
 void mqttPublishPersonUncertain(float confidence, int tracks) {
+    portENTER_CRITICAL(&uncertainMux);
+    pendingUncertainConf = confidence;
+    pendingUncertainTracks = tracks;
+    pendingUncertain = true;
+    portEXIT_CRITICAL(&uncertainMux);
+}
+
+static void mqttHandlePendingUncertain() {
+    float conf; int tracks; bool have;
+    portENTER_CRITICAL(&uncertainMux);
+    have = pendingUncertain;
+    conf = pendingUncertainConf;
+    tracks = pendingUncertainTracks;
+    pendingUncertain = false;
+    portEXIT_CRITICAL(&uncertainMux);
+    if (!have) return;
     String topic = topicBase() + "/person_uncertain";
     char payload[80];
-    snprintf(payload, sizeof(payload), "{\"confidence\":%.2f,\"tracks\":%d}", confidence, tracks);
+    snprintf(payload, sizeof(payload), "{\"confidence\":%.2f,\"tracks\":%d}", conf, tracks);
     mqttPublishOrQueue(topic.c_str(), payload, false, 0);
 }
 
@@ -502,6 +552,10 @@ void mqttTask(void* param) {
     unsigned long lastStatusPublish = 0;
     unsigned long lastHeartbeatPublish = 0;
     unsigned long lastReconnectAttempt = 0;
+    unsigned long lastMotionPublish = 0;
+    // Force one motion publish after every (re)connect: prevMotion restarts at false,
+    // so a stale retained ON on the broker would otherwise never be corrected.
+    bool forceMotionPublish = true;
 
     while (true) {
         esp_task_wdt_reset();
@@ -515,7 +569,7 @@ void mqttTask(void* param) {
         if (!mqttClient.connected()) {
             if (millis() - lastReconnectAttempt > 10000) {
                 lastReconnectAttempt = millis();
-                mqttConnect();
+                if (mqttConnect()) forceMotionPublish = true;
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
@@ -523,13 +577,20 @@ void mqttTask(void* param) {
 
         mqttClient.loop();
         mqttHandlePendingConfig();
+        mqttHandlePendingUncertain();
 
         // Publish state changes
         #ifdef INCLUDE_MOTION_DETECT
         bool curMotion = isMotionDetected();
-        if (curMotion != prevMotion) {
+        // A12 treats the hint as sticky for ~3 s, so republish ~1 s while ON and
+        // on the 5 s cadence while OFF, not only on change.
+        unsigned long motionPeriod = curMotion ? 1000UL : 5000UL;
+        if (curMotion != prevMotion || forceMotionPublish ||
+            millis() - lastMotionPublish >= motionPeriod) {
             mqttPublishMotion(curMotion);
             prevMotion = curMotion;
+            forceMotionPublish = false;
+            lastMotionPublish = millis();
         }
         #endif
 

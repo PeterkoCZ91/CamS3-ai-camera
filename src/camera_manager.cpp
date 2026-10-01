@@ -71,6 +71,8 @@ static SemaphoreHandle_t decodeMutex = NULL;
 static volatile uint32_t captureCount = 0;
 static volatile uint32_t captureErrors = 0;
 static volatile uint32_t lastCaptureMs = 0;
+static volatile uint32_t lastPublishedMs = 0;      // last frame really copied into the ring
+static volatile uint32_t oversizeDroppedFrames = 0;
 static volatile float captureFps = 0.0f;
 static uint32_t fpsCountStart = 0;
 static uint32_t fpsFrameCount = 0;
@@ -90,8 +92,82 @@ static volatile bool captureTaskExited = true;
 
 // Reinit request flag (set by capture task, handled by main loop / healthWatchdog)
 static volatile bool reinitRequested = false;
+// Capture was running when a reinit started and has not been restarted yet. Survives
+// failed attempts: stopCaptureTask() clears captureRunning, so re-reading that on the
+// next attempt wrongly concluded capture had never been running.
+static bool captureWantedAfterReinit = false;
 // Deferred sensor-settings apply, consumed by the capture task between frames.
 static volatile bool settingsApplyRequested = false;
+
+// ---- Read-only live sensor register view (GET /api/sensor) -------------------
+// Register reads go over SCCB, so they happen ONLY in the capture task, in the same
+// idle window as the deferred settings apply. Readers get a seq-lock protected copy.
+// The default list is the standard OV5640 map, a HYPOTHESIS: the sensor is described
+// as "PY260 / OV5640-derivative" and the meaning of these registers on PY260 is
+// UNVERIFIED. They are exposed as raw values keyed by address, nothing more.
+static const uint16_t SENSOR_REGS[SENSOR_VIEW_REGS] = {
+    0x3500, 0x3501, 0x3502, 0x3503, 0x350A, 0x350B,
+    0x3A0F, 0x3A10, 0x3A11, 0x3A1B, 0x3A1E, 0x3A1F,
+    0x5688, 0x5689, 0x568A, 0x568B, 0x568C, 0x568D, 0x568E, 0x568F
+};
+#define SENSOR_SAMPLE_EVERY 10
+static SensorView sensorView;                       // written by capture task only
+static volatile uint32_t sensorViewSeq = 0;         // odd while a write is in progress
+static volatile bool sensorOneShotPending = false;  // set by HTTP, cleared by capture task
+static volatile uint16_t sensorOneShotReg = 0;
+
+static void sensorViewSample() {
+    sensor_t* s = esp_camera_sensor_get();
+    SensorView v = sensorView;  // keep previous one-shot result
+    v.valid = false;
+    if (s && s->get_reg) {
+        v.valid = true;
+        v.pid = s->id.PID; v.ver = s->id.VER;
+        v.midh = s->id.MIDH; v.midl = s->id.MIDL;
+        v.frame = captureCount;
+        for (int i = 0; i < SENSOR_VIEW_REGS; i++) {
+            int r = s->get_reg(s, SENSOR_REGS[i], 0xFF);
+            v.regs[i] = r < 0 ? 0xFFFF : (uint16_t)(r & 0xFF);
+        }
+        if (sensorOneShotPending) {
+            uint16_t reg = sensorOneShotReg;
+            int r = s->get_reg(s, reg, 0xFF);
+            v.custom_reg = reg;
+            v.custom_val = r < 0 ? 0xFFFF : (uint16_t)(r & 0xFF);
+            v.custom_frame = v.frame;
+            v.custom_set = true;
+        }
+    }
+    sensorOneShotPending = false;
+    sensorViewSeq = sensorViewSeq + 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    sensorView = v;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    sensorViewSeq = sensorViewSeq + 1;
+}
+
+bool cameraSensorViewGet(SensorView* out) {
+    for (int tries = 0; tries < 5; tries++) {
+        uint32_t a = sensorViewSeq;
+        if (a & 1) { delayMicroseconds(50); continue; }
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        *out = sensorView;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (a == sensorViewSeq) return out->valid;
+    }
+    return false;
+}
+
+uint16_t cameraSensorViewRegAddr(int i) {
+    return (i >= 0 && i < SENSOR_VIEW_REGS) ? SENSOR_REGS[i] : 0;
+}
+
+void cameraSensorViewRequestReg(uint16_t reg) {
+    sensorOneShotReg = reg;
+    sensorOneShotPending = true;
+}
+
+bool cameraSensorViewOneShotPending() { return sensorOneShotPending; }
 
 // Max JPEG buffer size per slot (256KB should cover up to UXGA JPEG)
 #define MAX_FRAME_SIZE (256 * 1024)
@@ -101,14 +177,19 @@ static volatile bool settingsApplyRequested = false;
 // reinit does not need to (and must not) free them: readers hand out raw pointers
 // into these slots, and freeing underneath a streaming client was a use-after-free.
 // Keeping them also avoids re-fragmenting PSRAM with 3x256 kB churn on every reinit.
-static bool initRingBuffer() {
+// Created at the top of cameraInit(), before anything can fail, so a failed camera
+// init cannot leave NULL mutexes for the first stream client to take.
+static bool ensureMutexes() {
     if (!clientMutex) clientMutex = xSemaphoreCreateMutex();
     if (!decodeMutex) decodeMutex = xSemaphoreCreateMutex();
     if (!clientMutex || !decodeMutex) {
         logCapture("[%s] Failed to create mutexes\n", TAG);
         return false;
     }
+    return true;
+}
 
+static bool initRingBuffer() {
     bool firstInit = (ringBuffer[0].data == NULL);
 
     for (int i = 0; i < RING_BUF_SLOTS; i++) {
@@ -138,6 +219,7 @@ static bool initRingBuffer() {
 }
 
 bool cameraInit() {
+    ensureMutexes();  // best effort; users NULL-guard (see clientLock)
     camera_config_t config;
     memset(&config, 0, sizeof(config));
 
@@ -225,13 +307,14 @@ bool cameraDeinit() {
 
 bool cameraReinit() {
     logCapture("[%s] Reinitializing camera...\n", TAG);
-    bool wasRunning = captureRunning;
+    if (captureRunning) captureWantedAfterReinit = true;
     if (!cameraDeinit()) return false;
     delay(500);
 
     bool ok = cameraInit();
-    if (ok && wasRunning) {
+    if (ok && captureWantedAfterReinit) {
         startCaptureTask();
+        if (captureRunning) captureWantedAfterReinit = false;  // cleared only once really restarted
     }
     return ok;
 }
@@ -294,6 +377,7 @@ static void captureTask(void* param) {
             // Oversized frame: nothing can consume it, but dropping it without a
             // trace made it look like the camera had simply gone quiet.
             ringDroppedFrames++;
+            oversizeDroppedFrames++;
             if ((ringDroppedFrames % 50) == 1) {
                 logCapture("[%s] Frame %u B exceeds slot size %u B, dropped (total %lu)\n",
                            TAG, (unsigned)fb->len, (unsigned)MAX_FRAME_SIZE,
@@ -319,6 +403,7 @@ static void captureTask(void* param) {
                 __atomic_store_n(&ringBuffer[slot].ref_count, 0, __ATOMIC_SEQ_CST);
                 __atomic_store_n(&latestIndex, slot, __ATOMIC_SEQ_CST);
                 writeIndex = (slot + 1) % RING_BUF_SLOTS;
+                lastPublishedMs = capturedAt;
             } else {
                 // All slots held by readers. Dropping the frame is correct, but it
                 // used to happen silently — a stalled consumer looked like low FPS.
@@ -341,6 +426,11 @@ static void captureTask(void* param) {
         if (settingsApplyRequested) {
             settingsApplyRequested = false;
             applyConfigToCamera(false);
+        }
+
+        // Same idle SCCB window: refresh the read-only register view.
+        if (sensorOneShotPending || (captureCount % SENSOR_SAMPLE_EVERY) == 0) {
+            sensorViewSample();
         }
 
         // FPS calculation (every 2 seconds)
@@ -454,35 +544,41 @@ void cameraDecodeUnlock() {
     if (decodeMutex) xSemaphoreGive(decodeMutex);
 }
 
+// NULL-safe: if the mutex was never created, count unlocked rather than assert.
+static bool clientLock() {
+    return !clientMutex || xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100)) == pdTRUE;
+}
+static void clientUnlock() { if (clientMutex) xSemaphoreGive(clientMutex); }
+
 void streamClientConnected() {
-    if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
+    if (clientLock()) {
         streamClients++;
         logCapture("[%s] Stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        xSemaphoreGive(clientMutex);
+        clientUnlock();
     }
 }
 
 void streamClientDisconnected() {
-    if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
+    if (clientLock()) {
         if (streamClients > 0) streamClients--;
         logCapture("[%s] Stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        xSemaphoreGive(clientMutex);
+        clientUnlock();
     }
 }
 
 void detectionStreamClientConnected() {
-    if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
+    if (clientLock()) {
         detectionStreamClients++;
         logCapture("[%s] Detection stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        xSemaphoreGive(clientMutex);
+        clientUnlock();
     }
 }
 
 void detectionStreamClientDisconnected() {
-    if (xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100))) {
+    if (clientLock()) {
         if (detectionStreamClients > 0) detectionStreamClients--;
         logCapture("[%s] Detection stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        xSemaphoreGive(clientMutex);
+        clientUnlock();
     }
 }
 
@@ -493,3 +589,5 @@ uint32_t getCaptureCount()  { return captureCount; }
 float getCaptureFps()       { return captureFps; }
 uint32_t getLastCaptureMs() { return lastCaptureMs; }
 uint32_t getCaptureErrors() { return captureErrors; }
+uint32_t getLastPublishedMs() { return lastPublishedMs; }
+uint32_t getOversizeDroppedFrames() { return oversizeDroppedFrames; }

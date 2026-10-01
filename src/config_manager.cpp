@@ -8,11 +8,33 @@
 #include <mbedtls/md.h>
 #include <esp_mac.h>
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 static const char* TAG = "ConfigMgr";
 static const char* CONFIG_FILE     = "/config.json";
 static const char* CONFIG_FILE_TMP = "/config.json.tmp";
+static const char* CONFIG_FILE_BAK = "/config.json.bak";
 static Preferences nvs;
+
+// One recursive mutex for load/save/reset/secrets: callers are async handlers, the
+// telegram and mqtt tasks and the main loop, and the tmp filename + `nvs` handle are shared.
+// Recursive because loadConfig -> saveSecretsToNVS (migration) nests.
+static SemaphoreHandle_t cfgMutex = nullptr;
+static portMUX_TYPE cfgMutexInit = portMUX_INITIALIZER_UNLOCKED;
+struct CfgLock {
+    CfgLock() {
+        if (!cfgMutex) {  // create once, race-safe from any task
+            SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
+            portENTER_CRITICAL(&cfgMutexInit);
+            if (!cfgMutex) { cfgMutex = m; m = nullptr; }
+            portEXIT_CRITICAL(&cfgMutexInit);
+            if (m) vSemaphoreDelete(m);
+        }
+        xSemaphoreTakeRecursive(cfgMutex, portMAX_DELAY);
+    }
+    ~CfgLock() { xSemaphoreGiveRecursive(cfgMutex); }
+};
 
 AppConfig appConfig;
 
@@ -22,7 +44,11 @@ AppConfig appConfig;
 // Not a replacement for flash encryption, but raises the bar significantly.
 static uint8_t  secretsKey[32];
 static bool     secretsKeyReady = false;
-static const uint8_t ENC_MAGIC[4] = { 'E', 'N', 'C', '1' };
+static const uint8_t ENC_MAGIC[4]  = { 'E', 'N', 'C', '1' };  // legacy: header + ciphertext
+// ENC2 = same 20-byte header + ciphertext + 8-byte HMAC tag, so a wrong key (lost salt)
+// is detected instead of decrypting to garbage. ENC1 blobs are still accepted and rewritten.
+static const uint8_t ENC_MAGIC2[4] = { 'E', 'N', 'C', '2' };
+static const size_t  ENC_TAG_LEN   = 8;
 
 static void deriveSecretsKey() {
     if (secretsKeyReady) return;
@@ -38,8 +64,10 @@ static void deriveSecretsKey() {
         k.getBytes("salt", salt, sizeof(salt));
     } else {
         esp_fill_random(salt, sizeof(salt));
-        k.putBytes("salt", salt, sizeof(salt));
-        logCapture("[%s] Generated new secrets encryption salt\n", TAG);
+        bool saltOk = k.putBytes("salt", salt, sizeof(salt)) == sizeof(salt);
+        // Loud: any ENC1 secrets stored under the old salt are now unrecoverable garbage.
+        logCapture("[%s] Generated new secrets encryption salt (previous len %u, stored=%d) -- existing encrypted secrets cannot be decrypted\n",
+                   TAG, (unsigned)saltLen, (int)saltOk);
     }
     k.end();
 
@@ -49,19 +77,26 @@ static void deriveSecretsKey() {
 }
 
 // Put an encrypted secret under `key` (binary blob). Empty strings stored as empty blob.
+static void encTag(const uint8_t* blob, size_t pl, uint8_t* tag) {
+    uint8_t full[32];
+    mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), secretsKey, 32, blob, 20 + pl, full);
+    memcpy(tag, full, ENC_TAG_LEN);
+}
+
 static bool encPutSecret(Preferences& p, const char* key, const String& plaintext) {
     if (plaintext.length() == 0) {
-        p.remove(key);
-        return true;
+        // Intentionally empty: the only case where a key is deleted.
+        if (!p.isKey(key)) return true;
+        return p.remove(key);
     }
     deriveSecretsKey();
 
     size_t pl = plaintext.length();
-    size_t blobLen = 4 + 16 + pl;  // magic + IV + ciphertext
+    size_t blobLen = 4 + 16 + pl + ENC_TAG_LEN;  // magic + IV + ciphertext + tag
     uint8_t* blob = (uint8_t*)malloc(blobLen);
     if (!blob) return false;
 
-    memcpy(blob, ENC_MAGIC, 4);
+    memcpy(blob, ENC_MAGIC2, 4);
     esp_fill_random(blob + 4, 16);
 
     uint8_t nonceCounter[16];
@@ -75,6 +110,7 @@ static bool encPutSecret(Preferences& p, const char* key, const String& plaintex
     mbedtls_aes_crypt_ctr(&ctx, pl, &ncOff, nonceCounter, streamBlock,
                           (const unsigned char*)plaintext.c_str(), blob + 20);
     mbedtls_aes_free(&ctx);
+    encTag(blob, pl, blob + 20 + pl);
 
     bool ok = p.putBytes(key, blob, blobLen) == blobLen;
     free(blob);
@@ -102,7 +138,9 @@ static String encGetSecret(Preferences& p, const char* key, const char* defaultV
     p.getBytes(key, blob, len);
 
     // Not our magic → treat as raw string bytes (migrate target).
-    if (len < 20 || memcmp(blob, ENC_MAGIC, 4) != 0) {
+    bool isV2 = len >= 20 + ENC_TAG_LEN && memcmp(blob, ENC_MAGIC2, 4) == 0;
+    bool isV1 = len >= 20 && memcmp(blob, ENC_MAGIC, 4) == 0;
+    if (!isV1 && !isV2) {
         String fallback = p.getString(key, defaultVal);
         free(blob);
         if (fallback.length() > 0 && fallback != String(defaultVal)) secretsNeedMigration = true;
@@ -110,7 +148,19 @@ static String encGetSecret(Preferences& p, const char* key, const char* defaultV
     }
 
     deriveSecretsKey();
-    size_t pl = len - 20;
+    size_t pl = len - 20 - (isV2 ? ENC_TAG_LEN : 0);
+    if (isV2) {
+        uint8_t tag[ENC_TAG_LEN];
+        encTag(blob, pl, tag);
+        if (memcmp(tag, blob + 20 + pl, ENC_TAG_LEN) != 0) {
+            // Wrong key (salt regenerated) or corrupt blob: return default, not garbage.
+            logCapture("[%s] Secret '%s' failed integrity check, using default\n", TAG, key);
+            free(blob);
+            return String(defaultVal);
+        }
+    } else {
+        secretsNeedMigration = true;  // ENC1 -> ENC2 rewrite (adds integrity tag)
+    }
     uint8_t* out = (uint8_t*)malloc(pl + 1);
     if (!out) { free(blob); return String(defaultVal); }
 
@@ -136,6 +186,7 @@ static String encGetSecret(Preferences& p, const char* key, const char* defaultV
 void saveSecretsToNVS();
 
 static void loadSecretsFromNVS() {
+    CfgLock lock;
     nvs.begin("cams3", true);  // read-only
     appConfig.wifi.ssid           = encGetSecret(nvs, "wifi_ssid", "");
     appConfig.wifi.password       = encGetSecret(nvs, "wifi_pass", "");
@@ -153,7 +204,25 @@ static void loadSecretsFromNVS() {
     }
 }
 
+// Parse a config file into doc. Returns false (and logs) if missing/unreadable/invalid.
+static bool readConfigFile(const char* path, JsonDocument& doc) {
+    if (!LittleFS.exists(path)) return false;
+    File f = LittleFS.open(path, "r");
+    if (!f) {
+        logCapture("[%s] Failed to open %s\n", TAG, path);
+        return false;
+    }
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+    if (err) {
+        logCapture("[%s] JSON parse error in %s: %s\n", TAG, path, err.c_str());
+        return false;
+    }
+    return true;
+}
+
 bool loadConfig() {
+    CfgLock lock;
     // Always load secrets from NVS first — independent of LittleFS health.
     // Previously secrets loaded only at the end of JSON parse; an unmountable
     // filesystem (fresh flash, missing fs image) left WiFi creds empty forever.
@@ -167,24 +236,20 @@ bool loadConfig() {
         LittleFS.remove(CONFIG_FILE_TMP);
     }
 
-    if (!LittleFS.exists(CONFIG_FILE)) {
+    if (!LittleFS.exists(CONFIG_FILE) && !LittleFS.exists(CONFIG_FILE_BAK)) {
         logCapture("[%s] No config file, using defaults (secrets already loaded from NVS)\n", TAG);
         return false;
     }
 
-    File f = LittleFS.open(CONFIG_FILE, "r");
-    if (!f) {
-        logCapture("[%s] Failed to open config file\n", TAG);
-        return false;
-    }
-
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, f);
-    f.close();
-
-    if (err) {
-        logCapture("[%s] JSON parse error: %s\n", TAG, err.c_str());
-        return false;
+    if (!readConfigFile(CONFIG_FILE, doc)) {
+        doc.clear();
+        // Truncated/corrupt (e.g. full filesystem or power cut): fall back to last good copy.
+        if (!readConfigFile(CONFIG_FILE_BAK, doc)) {
+            logCapture("[%s] No usable config (main and .bak), using defaults\n", TAG);
+            return false;
+        }
+        logCapture("[%s] WARNING: config.json unusable, loaded config.json.bak\n", TAG);
     }
 
     int ver = doc["version"] | 0;
@@ -333,6 +398,7 @@ bool loadConfig() {
 }
 
 bool saveConfig() {
+    CfgLock lock;
     JsonDocument doc;
     doc["version"] = CONFIG_VERSION;
 
@@ -455,16 +521,27 @@ bool saveConfig() {
         return false;
     }
 
+    size_t expected = measureJsonPretty(doc);
     size_t written = serializeJsonPretty(doc, f);
     f.close();
-    if (written == 0) {
-        logCapture("[%s] Failed to write config tmp\n", TAG);
+    // A full LittleFS yields a short write; never rename a truncated file over the good config.
+    size_t onDisk = 0;
+    { File chk = LittleFS.open(CONFIG_FILE_TMP, "r"); if (chk) { onDisk = chk.size(); chk.close(); } }
+    if (written == 0 || written != expected || onDisk != expected) {
+        logCapture("[%s] Config tmp write incomplete (wrote %u, expected %u, on disk %u) -- keeping old config\n",
+                   TAG, (unsigned)written, (unsigned)expected, (unsigned)onDisk);
         LittleFS.remove(CONFIG_FILE_TMP);
         return false;
     }
 
+    // Keep the last good file as .bak, then move tmp into place. If power dies between the
+    // two renames, loadConfig recovers from .tmp (complete, verified above) or .bak.
     if (LittleFS.exists(CONFIG_FILE)) {
-        LittleFS.remove(CONFIG_FILE);
+        LittleFS.remove(CONFIG_FILE_BAK);
+        if (!LittleFS.rename(CONFIG_FILE, CONFIG_FILE_BAK)) {
+            logCapture("[%s] Could not create config.json.bak\n", TAG);
+            LittleFS.remove(CONFIG_FILE);  // tmp is verified, proceed
+        }
     }
     if (!LittleFS.rename(CONFIG_FILE_TMP, CONFIG_FILE)) {
         logCapture("[%s] Atomic rename failed\n", TAG);
@@ -475,26 +552,49 @@ bool saveConfig() {
     return true;
 }
 
-void saveSecretsToNVS() {
-    nvs.begin("cams3", false);
-    // Legacy plaintext string entries (if any from older firmware) must be
-    // removed first — NVS can't hold a string and a blob under the same key.
-    const char* keys[] = {"wifi_ssid","wifi_pass","http_pass","mqtt_user","mqtt_pass","tg_token","tg_chat_id"};
-    for (const char* k : keys) nvs.remove(k);
+// Is `key` already stored as an ENC2 blob that decrypts to `want`? Then no write is needed.
+static bool secretUnchanged(Preferences& p, const char* key, const String& want) {
+    if (want.length() == 0) return !p.isKey(key);
+    size_t len = p.getBytesLength(key);
+    if (len != 4 + 16 + want.length() + ENC_TAG_LEN) return false;
+    uint8_t magic[4];
+    if (p.getBytes(key, magic, 4) != 4 || memcmp(magic, ENC_MAGIC2, 4) != 0) return false;
+    bool saved = secretsNeedMigration;
+    String cur = encGetSecret(p, key, "");
+    secretsNeedMigration = saved;
+    return cur == want;
+}
 
-    encPutSecret(nvs, "wifi_ssid", appConfig.wifi.ssid);
-    encPutSecret(nvs, "wifi_pass", appConfig.wifi.password);
-    encPutSecret(nvs, "http_pass", appConfig.auth.http_pass);
-    encPutSecret(nvs, "mqtt_user", appConfig.mqtt.user);
-    encPutSecret(nvs, "mqtt_pass", appConfig.mqtt.password);
-    encPutSecret(nvs, "tg_token",  appConfig.telegram.bot_token);
-    encPutSecret(nvs, "tg_chat_id", appConfig.telegram.chat_id);
+void saveSecretsToNVS() {
+    CfgLock lock;
+    if (!nvs.begin("cams3", false)) {
+        logCapture("[%s] ERROR: cannot open NVS for secrets, nothing saved\n", TAG);
+        return;
+    }
+    struct { const char* key; const String* val; } items[] = {
+        {"wifi_ssid", &appConfig.wifi.ssid}, {"wifi_pass", &appConfig.wifi.password},
+        {"http_pass", &appConfig.auth.http_pass},
+        {"mqtt_user", &appConfig.mqtt.user}, {"mqtt_pass", &appConfig.mqtt.password},
+        {"tg_token", &appConfig.telegram.bot_token}, {"tg_chat_id", &appConfig.telegram.chat_id},
+    };
+    for (auto& it : items) {
+        // Write per key, only if changed: no remove-all window where a power cut loses wifi creds.
+        if (secretUnchanged(nvs, it.key, *it.val)) continue;
+        // A legacy plaintext (string-typed) entry can't be overwritten by a blob: drop just that one.
+        if (it.val->length() > 0 && nvs.isKey(it.key) && nvs.getBytesLength(it.key) == 0) nvs.remove(it.key);
+        if (!encPutSecret(nvs, it.key, *it.val)) {
+            logCapture("[%s] ERROR: failed to store secret '%s' in NVS\n", TAG, it.key);
+        }
+    }
     nvs.end();
 }
 
 void resetConfig() {
+    CfgLock lock;
     appConfig = AppConfig();
     LittleFS.remove(CONFIG_FILE);
+    LittleFS.remove(CONFIG_FILE_BAK);  // otherwise loadConfig would resurrect the old config
+    LittleFS.remove(CONFIG_FILE_TMP);
     nvs.begin("cams3", false);
     nvs.clear();
     nvs.end();

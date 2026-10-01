@@ -5,6 +5,8 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include <lwip/sockets.h>
+#include <errno.h>
+#include "esp_heap_caps.h"
 
 static const char* TAG = "StreamSrv";
 
@@ -72,7 +74,21 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     routeClientConnected(cfg);
     logCapture("[%s] %s stream client connected (fd=%d)\n", TAG, cfg->role, fd);
 
+    uint32_t lastActivityMs = millis();
     while (true) {
+        // Idle too long (no new frame to send): a dead peer is otherwise never
+        // noticed because only writes fail. Peek the socket without consuming data;
+        // 0 = orderly close, a hard error other than EAGAIN = reset.
+        if (millis() - lastActivityMs > 2000) {
+            char probe;
+            int r = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                res = ESP_FAIL;
+                break;
+            }
+            lastActivityMs = millis();   // probe again in another 2 s
+        }
+
         const uint8_t* buf = NULL;
         size_t len = 0;
 
@@ -89,6 +105,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
             continue;
         }
         lastSentTimestamp = ts;
+        lastActivityMs = millis();
         uint32_t now = millis();
         uint32_t age = (ts > 0 && now >= ts) ? (now - ts) : 0;
 
@@ -125,16 +142,27 @@ static esp_err_t snapshotHandler(httpd_req_t* req) {
     const uint8_t* buf = NULL;
     size_t len = 0;
 
+    // A slow client must not hold a ring slot (it would starve the capture task).
+    int fd = httpd_req_to_sockfd(req);
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     int rh = ringBufferGetLatest(&buf, &len);
     if (rh >= 0) {
         uint32_t ts = ringBufferGetTimestamp(rh);
+        // Copy the frame out and release the slot before the (blocking) send.
+        uint8_t* copy = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+        if (copy) memcpy(copy, buf, len);
+        else if (!(copy = (uint8_t*)malloc(len))) { ringBufferRelease(rh); httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"); return ESP_FAIL; }
+        else memcpy(copy, buf, len);
+        ringBufferRelease(rh);
         httpd_resp_set_type(req, "image/jpeg");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=snapshot.jpg");
         httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
         if (ts > 0) httpd_resp_set_hdr(req, "X-Timestamp", String(ts).c_str());
-        esp_err_t res = httpd_resp_send(req, (const char*)buf, len);
-        ringBufferRelease(rh);
+        esp_err_t res = httpd_resp_send(req, (const char*)copy, len);
+        free(copy);
         return res;
     }
 

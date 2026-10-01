@@ -44,7 +44,7 @@ struct MotionDebugInfo {
     uint32_t analysis_ms;        // Motion analysis time
 };
 
-void motionDetectInit();
+bool motionDetectInit();  // false = buffers not allocated, do NOT start the task
 void motionDetectSetSemaphore(SemaphoreHandle_t sem);
 
 // Region of interest: one character per grid block, row-major, MOTION_GRID_SIZE

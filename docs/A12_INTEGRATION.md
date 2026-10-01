@@ -83,8 +83,15 @@ capture_errors  not increasing over time
 ```
 
 When something is wrong, `issues` names it — `wifi down`, `stale frame (>10s)`,
-`capture stalled`, `low heap`, `sd writes disabled` — so an alert can say what broke
+`capture stalled`, `frames being dropped`, `low heap`, `sd writes disabled` — so an alert can say what broke
 instead of just that something did.
+
+`/health` also carries `device_name` (the hostname — derive the
+`esp32cam/<device>/…` MQTT topics from it), `ring_dropped` / `ring_oversize`, and a
+`frame_age_ms` measured from the last frame actually published to the ring.
+
+A12 restarts the camera with `POST /reboot` (alias of `POST /api/reboot`, no CSRF
+token needed for non-browser clients; HTTP Basic Auth still applies when configured).
 
 `/health` also carries the restart history: `total_restarts`, per-cause counters and
 `power_health`, which turns `"suspect"` when the restart pattern points at the power

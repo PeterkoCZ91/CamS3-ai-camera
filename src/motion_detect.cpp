@@ -56,6 +56,9 @@ static int trainingCount = 0;
 static int consecutiveMotionFrames = 0;
 static bool bgResetRequested = false;
 static int prevAvgBrightness = -1;
+// Timestamp of the last ring frame analysed / millis() of the last fired event.
+static uint32_t lastAnalysedTs = 0;
+static unsigned long lastEventTime = 0;
 static MotionDebugInfo debugInfo = {};
 static portMUX_TYPE debugMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -232,7 +235,7 @@ static int spatialFilter(const uint8_t* mask, uint8_t* filtered, int minNeighbor
     return clustered;
 }
 
-void motionDetectInit() {
+bool motionDetectInit() {
     // decodeBuffer must accommodate the JPEG decoder's actual output size
     // (source_W/8 * source_H/8 * 2). Allocate for the sensor's largest frame so
     // no frame_size can ever overflow it (QSXGA 2560x1920 / 8 = 320x240).
@@ -245,7 +248,7 @@ void motionDetectInit() {
 
     if (!decodeBuffer || !grayFrame || !blockGrid || !bgModel || !diffMask || !prevDiffMask) {
         logCapture("[%s] Failed to allocate PSRAM buffers!\n", TAG);
-        return;
+        return false;
     }
 
     // Initialize background model
@@ -259,6 +262,7 @@ void motionDetectInit() {
 
     logCapture("[%s] Advanced motion detection initialized (decode %dx%d, grid %dx%d)\n",
                   TAG, MOTION_DECODE_W, MOTION_DECODE_H, MOTION_GRID_W, MOTION_GRID_H);
+    return true;
 }
 
 void motionDetectSetSemaphore(SemaphoreHandle_t sem) {
@@ -311,6 +315,15 @@ void motionDetectTask(void* param) {
             continue;
         }
 
+        // Same frame as last pass (idle_fps < 5 Hz poll): skip, otherwise one frame
+        // counts as several "consecutive" frames and defeats the temporal filter.
+        uint32_t frameTs = ringBufferGetTimestamp(rh);
+        if (frameTs == lastAnalysedTs) {
+            ringBufferRelease(rh);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         // Refuse to decode anything that would not fit — checked before the
         // decode, not after, because jpg2rgb565 has no output bound.
         int decW = 0, decH = 0;
@@ -322,6 +335,7 @@ void motionDetectTask(void* param) {
             continue;
         }
 
+        lastAnalysedTs = frameTs;
         uint32_t t0 = millis();
 
         // Step 1: JPEG decode to RGB565 with 1/8 scaling.
@@ -534,13 +548,17 @@ void motionDetectTask(void* param) {
         if (motionConfirmed) {
             unsigned long now = millis();
             unsigned long cooldownMs = appConfig.motion.cooldown_sec * 1000UL;
-            bool risingEdge = !motionDetected;
+            // Rising edge also needs cooldown_sec since the last fired event: motionDetected
+            // clears after 5 s quiet, which capped the effective cooldown at ~5 s.
+            bool cooldownOver = (motionEventCount == 0) || (now - lastEventTime >= cooldownMs);
+            bool risingEdge = !motionDetected && cooldownOver;
             bool cooldownExpired = motionDetected && (now - lastMotionTime > cooldownMs);
 
             motionDetected = true;
             lastMotionTime = now;
 
             if (risingEdge || cooldownExpired) {
+                lastEventTime = now;
                 motionEventCount++;
 
                 // Zone hit detection — fills comma-separated zone names if any match
