@@ -114,8 +114,43 @@ pio run -t upload --upload-port COM5                 # Windows
 If the board is not detected at all, put it in download mode: hold **BOOT**, tap
 **RESET**, release **BOOT**, then run the command again.
 
+> **CamS3 5MP sold with a Grove2USB-C adapter (HY2.0-4P port):** that variant has no
+> BOOT or RESET button. The vendor's shop page says to bridge pins **G0** and **GND**
+> with the supplied wire **before** powering on to enter upload mode. This comes from
+> the vendor page only and was not needed on the maintainer's unit, where plain
+> `esptool` default reset worked after several connection attempts. If you do use the
+> wire, remove it and power-cycle the board afterwards, otherwise it boots into
+> download mode again.
+
 Upload speed is 460800 baud. If you see checksum errors on a long or unpowered
 cable, lower it: `pio run -t upload --upload-speed 115200`.
+
+### If the upload dies halfway
+
+Symptoms:
+
+* small regions (bootloader, partition table, otadata) write and verify fine;
+* the first large write fails with `A fatal error occurred: The chip stopped
+  responding` or `Packet content transfer stopped`;
+* `esptool erase_flash` fails the same way;
+* the USB device re-enumerates repeatedly (visible in `dmesg`).
+
+Write the application in small pieces with retries instead:
+
+```bash
+python3 tools/flash_chunked.py --port /dev/ttyACM0
+python3 tools/flash_chunked.py --dry-run     # print the plan, write nothing
+```
+
+It writes the app in 64 kB pieces. `--fs` also writes the web UI filesystem image;
+that option is **experimental and has not yet been run on hardware**.
+
+What was observed: a single 1.4 MB write kept failing, while the same image written in
+64 kB pieces succeeded. The cause is not established; power or the USB link is the
+suspect, so try another cable or port first.
+
+Caution: after the chunked firmware write the board runs **without a filesystem**, so
+the web UI answers `404` until the filesystem is written (§6). The JSON API works.
 
 ## 6. Flash the filesystem — this step is mandatory
 
@@ -203,6 +238,22 @@ again.
 Once connected, the device is reachable at `http://<camera-ip>/` and, with mDNS
 enabled (default), at `http://cams3.local/`. The hostname comes from
 `appConfig.wifi.hostname` — change it in Settings if you run more than one camera.
+
+#### Joining WiFi without a phone
+
+If you cannot use the captive portal, write the credentials over USB:
+
+```bash
+python3 tools/provision_wifi.py --ssid <name>
+```
+
+It asks for the password (or reads `CAMS3_WIFI_PASS`) and writes an NVS image with
+plain-string `wifi_ssid` / `wifi_pass` in namespace `cams3` to the `nvs` partition. The
+firmware re-encrypts them on first boot. `--dry-run` only generates the image.
+
+**This replaces the whole NVS partition**, so the HTTP password and the MQTT and
+Telegram secrets fall back to defaults. Verified once on hardware: the board then
+joined the LAN by itself.
 
 ### 8.2 Change the default HTTP password
 

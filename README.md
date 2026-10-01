@@ -105,7 +105,10 @@ pio device monitor -b 115200
 ```
 
 Detailed first-flash instructions, USB/CDC notes and recovery steps live in
-[`docs/FIRST_FLASH.md`](docs/FIRST_FLASH.md).
+[`docs/FIRST_FLASH.md`](docs/FIRST_FLASH.md). If a large write dies halfway with
+"The chip stopped responding", `python3 tools/flash_chunked.py` writes the image in
+64 kB pieces; `python3 tools/provision_wifi.py --ssid <name>` stores WiFi credentials
+over USB when no phone is at hand to use the setup portal.
 
 ### The FOMO model
 
@@ -625,8 +628,8 @@ or MQTT. There is no cloud service, no telemetry and no phone-home.
   "Connecting…" after a successful login. The broadcast carries only non-secret
   status and the socket accepts no commands, but anyone on the LAN can read it.
 - **`/api/status`, `/status`, `/telemetry`, `/health`, `/a12/status`,
-  `/api/snapshot`, `/api/events`, `/log`, `/stream-stats` and `/psram-stats` are
-  public** — that includes a JPEG frame and the log ring buffer.
+  `/api/sensor` (read-only register view), `/api/snapshot`, `/api/events`, `/log`,
+  `/stream-stats` and `/psram-stats` are public** — that includes a JPEG frame and the log ring buffer.
 - **Telegram TLS uses `setInsecure()`** on all four HTTPS paths: no certificate
   validation, so the connection to `api.telegram.org` is not protected against an
   active man-in-the-middle. MQTT TLS verifies *if* you upload a `/ca.pem`;

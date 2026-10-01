@@ -3,6 +3,63 @@
 All notable changes to this firmware. Versions follow semantic versioning, where
 "breaking" means *an upgrade needs manual steps*, not an API change.
 
+## [Unreleased]
+
+### Note before downgrading
+
+- Stored secrets are rewritten on first boot in a new format with an integrity tag
+  (`ENC2`). Older firmware cannot read them: after a downgrade WiFi, the HTTP password,
+  MQTT and Telegram credentials have to be entered again.
+
+### Added
+
+- **`GET /api/sensor`** — live sensor state sampled by the capture task: chip ID and the
+  raw values of the exposure, gain, AEC target and metering-weight registers. Until now
+  `/api/status` only echoed the configuration, so nobody could tell what auto exposure
+  actually did. On hardware the sensor reports PID `0x5640` and the OV5640 register map
+  holds (the exposure registers equal `aec_value`). `?reg=0xNNNN` reads one register.
+- **`POST /reboot`** as an alias of `/api/reboot` for the A12 companion, which calls that
+  path; `/health` now reports `device_name`, `ring_dropped` and `ring_oversize`.
+- **`tools/flash_chunked.py`** writes the firmware in 64 kB pieces with retries, for boards
+  whose single large write dies with "The chip stopped responding" (seen on a CamS3).
+- **`tools/provision_wifi.py`** puts WiFi credentials into NVS over USB, so a board in
+  AP mode can join the network without a phone.
+
+### Fixed
+
+- **The brownout detector was switched off.** `WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0x10000)`
+  clears the enable bits on the ESP32-S3, the opposite of its comment. A supply sag now
+  gives a clean `BROWNOUT` reset instead of a lock-up or a power-on reset that hides the cause.
+- **AP fallback was permanent.** After a power cut the camera often boots before the
+  router; it fell back to `CamS3-Setup` and never tried the stored network again. It now
+  retries every 45 s and leaves the portal on success; new credentials are stored only
+  after they connect.
+- **Saving secrets removed all keys first.** A power cut in between lost the WiFi
+  credentials. Each key is now written on its own, only when it changed, with errors logged.
+- **`config.json` could be replaced by a truncated file** on a full filesystem. The write
+  is checked against the expected size, the previous file is kept as `config.json.bak`,
+  and loading falls back to it.
+- **Camera recovery:** a reinit that followed a failed one never restarted capture, and a
+  reinit that "succeeded" without frames repeated forever; the watchdog counted frames that
+  were dropped as delivered. All three now escalate to a reboot.
+- **A stream client connecting after a failed camera init asserted** on a NULL mutex.
+- **Motion analysed the same frame several times** at idle FPS, bypassing the two-frame
+  confirmation, and `cooldown_sec` was effectively capped at 5 s.
+- **`aec2` was accepted by `POST /api/settings` but never applied**; `frame_size` above
+  UXGA (13) is no longer accepted, since it could leave the board rebooting at boot.
+  The response now lists keys it ignored.
+- **A stream client that disappeared while no frame was due was never released** on port 81.
+  Port 81 still serves one stream client at a time; the docs now say so.
+- **Telegram `/restart` rebooted the board again on every boot** until Telegram dropped the
+  unacknowledged update; stale commands sent while offline also ran at boot. `/ticho` twice
+  muted notifications permanently. A permanently rejected photo blocked the SD queue.
+- **MQTT:** the person-detection task published from a second task (the client is not
+  thread-safe); motion state is republished after reconnect and every second while ON;
+  topic prefix and hostname are sanitised; truncated Home Assistant discovery payloads are
+  no longer published.
+- Docs: download mode on the button-less variant, flashing when large writes fail, and
+  three new known issues (large writes, `/api/status` echoes config, no illumination output).
+
 ## [2.0.0]
 
 Major because upgrading is not a plain OTA: the partition table changed, so the
