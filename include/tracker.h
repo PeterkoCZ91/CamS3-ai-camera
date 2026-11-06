@@ -47,6 +47,10 @@ void trackerReset();
 // Update tracker with new detections. Returns number of confirmed tracks.
 int trackerUpdate(const Detection* detections, int numDetections);
 
+// Pixel-distance scale for the fitted lens: tan(ref/2)/tan(fov/2), clamped to
+// [0.5, 2.0]. Exactly 1.0 unless both lens_fov_deg and lens_ref_fov_deg are set.
+float lensScale();
+
 // Get all tracks (includes all states)
 const Track* trackerGetTracks(int* count);
 

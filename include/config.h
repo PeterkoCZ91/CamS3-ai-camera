@@ -91,6 +91,8 @@ struct CameraSettings {
     bool wpc          = true;
     bool raw_gma      = true;
     bool lenc         = true;
+    // Opt-in night overlay (see cameraAutoProfileTick). Off by default: untested on PY260.
+    bool auto_profile = false;
 };
 
 struct WiFiSettings {
@@ -208,6 +210,8 @@ struct AppConfig {
     bool led_enabled = true;
     int idle_fps     = 1;     // FPS when no client streaming
     int active_fps   = 15;    // FPS when client streaming
+    int lens_fov_deg = 0;     // horizontal FOV of the fitted lens, owner-entered (0 = unknown)
+    int lens_ref_fov_deg = 0; // FOV the pixel thresholds were tuned for; 0 = FOV scaling off
 };
 
 // Global config instance
@@ -226,5 +230,7 @@ void resetConfig();
 // running driver leaves the DMA buffers sized for the old resolution, so that path
 // goes through a full cameraReinit() instead.
 void applyConfigToCamera(bool applyFrameSize = true);
+// True while the auto night profile overlay is active (owned by the capture task).
+bool cameraNightProfileActive();
 
 #endif // CONFIG_H

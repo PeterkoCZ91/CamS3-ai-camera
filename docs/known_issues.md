@@ -546,3 +546,7 @@ it to about 108/255.
 
 Use manual exposure for a fixed scene. It does not adapt to day and night. The real fix
 is front lighting on the subject.
+
+## 16. Sibling-API gaps and A12 settings
+
+No microphone code and no light sensor: set A12 `AUDIO_ENABLED=false` and keep `camera_profiles.apply_from_a12=false`. `/sd-clear`, `/sd-log`, `/wifi-save`, RTSP and audio are not implemented. See `docs/A12_INTEGRATION.md`.

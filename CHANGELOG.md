@@ -12,7 +12,20 @@ All notable changes to this firmware. Versions follow semantic versioning, where
   MQTT and Telegram credentials have to be entered again.
 
 ### Added
+- Opt-in `auto_profile` setting: a NIGHT exposure overlay driven by mean frame brightness (no light sensor on this board), applied from the capture task with hysteresis and a 60 s dwell.
 
+- **`GET /api/focus`** (alias `/focus`): on-demand focus score (Laplacian variance of the centre crop) for focusing a manual lens by number, with a running `peak` and `?reset=1`. Costs nothing until requested, then samples every ~500 ms for 10 s after the last call.
+- **Lens profiles**: `GET`/`POST /api/lens-profiles` save, apply and delete named snapshots (up to 4, stored in `/lens_profiles.json`) of `lens_fov_deg` + `lenc` + `sharpness`, so swapping a lens is one action. The `active` name is RAM-only.
+- **`lens_ref_fov_deg`** setting (0-220, `0` = off): FOV the pixel thresholds were tuned for. When set together with `lens_fov_deg`, the tracker scales its match distance by `tan(ref/2)/tan(fov/2)`, clamped to 0.5-2 (both angles capped at 170). Only `match_dist` is scaled.
+
+- **DFR1154 API alignment**: alias routes `/motion-status`, `/zones` (GET, POST, delete via
+  `{"delete":"<name>"}`), `/roi-mask` (GET now also returns `w`, `h`), `/reg-debug`,
+  `/wifi-scan`, `/sd-download`. `/status` and `/settings` gained `sensor`, `lens_fov_deg`
+  (new persisted setting, 0-220), `uptime_days`, `uptime_hours`, `mqtt_state`,
+  `mqtt_connects`, `mqtt_failures`, `mqtt_link_uptime_s`; `/health` gained `heap_health`,
+  `wifi_quality`, `lens_fov_deg`, `sensor`. Not implemented: `/sd-clear`, `/sd-log`,
+  `/wifi-save`, RTSP, audio. A12 users: set `AUDIO_ENABLED=false` and keep
+  `camera_profiles.apply_from_a12=false`.
 - **`GET /api/sensor`** — live sensor state sampled by the capture task: chip ID and the
   raw values of the exposure, gain, AEC target and metering-weight registers. Until now
   `/api/status` only echoed the configuration, so nobody could tell what auto exposure

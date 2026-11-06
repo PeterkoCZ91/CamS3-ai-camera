@@ -3,6 +3,7 @@
 #include "camera_manager.h"
 #include "wifi_manager.h"
 #include "board_config.h"
+#include "lens_profiles.h"
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
@@ -50,6 +51,7 @@
 #endif
 
 #include "ws_log.h"
+#include "focus_score.h"
 #include "system_stats.h"
 
 static const char* TAG = "WebSrv";
@@ -283,6 +285,7 @@ static String buildStatusJson() {
     doc["aec"]           = appConfig.camera.aec;
     doc["aec2"]          = appConfig.camera.aec2;
     doc["agc"]           = appConfig.camera.agc;
+    doc["auto_profile"]  = appConfig.camera.auto_profile;
     doc["awb"]           = appConfig.camera.awb;
     doc["bpc"]           = appConfig.camera.bpc;
     doc["wpc"]           = appConfig.camera.wpc;
@@ -360,6 +363,13 @@ static String buildStatusJson() {
     doc["mqtt_pass_set"] = appConfig.mqtt.password.length() > 0;
     #ifdef INCLUDE_MQTT
     doc["mqtt_connected"] = isMqttConnected();
+    {
+        MqttLinkStats ml = mqttGetLinkStats();   // same names as the DFR1154 /status
+        doc["mqtt_state"]         = ml.state;
+        doc["mqtt_connects"]      = ml.connects;
+        doc["mqtt_failures"]      = ml.failures;
+        doc["mqtt_link_uptime_s"] = ml.link_uptime_s;
+    }
     #endif
 
     // Telegram
@@ -390,6 +400,11 @@ static String buildStatusJson() {
 
     // Compatibility aliases for the DFR1154 v3.12.x embedded GUI and A12 tools.
     doc["uptime_seconds"] = millis() / 1000;
+    doc["uptime_days"]    = (millis() / 1000) / 86400;
+    doc["uptime_hours"]   = ((millis() / 1000) % 86400) / 3600;   // hour part, as on the DFR1154
+    doc["sensor"]         = "PY260";
+    doc["lens_fov_deg"]   = appConfig.lens_fov_deg;
+    doc["lens_ref_fov_deg"] = appConfig.lens_ref_fov_deg;
     doc["max_alloc_heap"] = ESP.getMaxAllocHeap();
     doc["flash_used"] = ESP.getSketchSize();
     doc["flash_usage_pct"] = ESP.getFlashChipSize() > 0
@@ -435,7 +450,13 @@ static String buildStatusJson() {
     ambient = mdi.avg_brightness;
     #endif
     doc["ambient_light_lux"] = ambient;
-    doc["camera_profile"] = ambient < 15.0f ? "NIGHT" : (ambient < 40.0f ? "DUSK" : "DAY");
+    doc["auto_profile"] = appConfig.camera.auto_profile;
+    // With auto_profile on, report the profile actually applied to the sensor;
+    // otherwise keep the brightness-derived label (informational only).
+    if (appConfig.camera.auto_profile)
+        doc["camera_profile"] = cameraNightProfileActive() ? "NIGHT" : "DAY";
+    else
+        doc["camera_profile"] = ambient < 15.0f ? "NIGHT" : (ambient < 40.0f ? "DUSK" : "DAY");
     doc["ir_led"] = false;
     doc["is_recording"] = false;
     doc["telegram_queue_depth"] = 0;
@@ -470,6 +491,19 @@ static String buildStatusJson() {
 // API: GET /api/status
 static void handleApiStatus(AsyncWebServerRequest* request) {
     request->send(200, "application/json", buildStatusJson());
+}
+
+// API: GET /api/focus[?reset=1]  (alias /focus)
+// Starts/keeps alive the on-demand focus worker and returns its latest sample;
+// the first call of a session answers valid:false, poll again ~500 ms later.
+static void handleApiFocus(AsyncWebServerRequest* request) {
+    focusScoreTouch(request->hasParam("reset"));
+    FocusScore f = focusScoreGet();
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"focus_score\":%.2f,\"peak\":%.2f,\"age_ms\":%lu,\"valid\":%s}",
+             f.score, f.peak, (unsigned long)f.age_ms, f.valid ? "true" : "false");
+    request->send(200, "application/json", body);
 }
 
 // API: GET /api/sensor[?reg=0xNNNN]
@@ -592,6 +626,11 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     // and the detection buffers actually accept — these values arrive from the
     // network and used to be written through to the driver unchecked.
     int prevFrameSize = appConfig.camera.frame_size;
+    // Remember the lens-dependent trio so an unchanged resend of the whole form
+    // does not drop the "active lens profile" marker.
+    const int  prevLensFov = appConfig.lens_fov_deg;
+    const bool prevLenc    = appConfig.camera.lenc;
+    const int  prevSharp   = appConfig.camera.sharpness;
     if (ok("frame_size", doc["frame_size"].is<int>()))   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], FRAMESIZE_QVGA, FRAMESIZE_UXGA); needCameraApply = true; }
     if (ok("jpeg_quality", doc["jpeg_quality"].is<int>())) { appConfig.camera.jpeg_quality = clampInt(doc["jpeg_quality"], 4, 63);  needCameraApply = true; }
     if (ok("vflip", doc["vflip"].is<bool>()))       { appConfig.camera.vflip        = doc["vflip"];         needCameraApply = true; }
@@ -608,6 +647,7 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     if (ok("wb_mode", doc["wb_mode"].is<int>()))      { appConfig.camera.wb_mode      = clampInt(doc["wb_mode"], 0, 4);        needCameraApply = true; }
     if (ok("aec2", doc["aec2"].is<bool>()))            { appConfig.camera.aec2         = doc["aec2"];          needCameraApply = true; }
     if (ok("aec", doc["aec"].is<bool>()))         { appConfig.camera.aec          = doc["aec"];           needCameraApply = true; }
+    if (ok("auto_profile", doc["auto_profile"].is<bool>())) { appConfig.camera.auto_profile = doc["auto_profile"]; needCameraApply = true; }
     if (ok("agc", doc["agc"].is<bool>()))         { appConfig.camera.agc          = doc["agc"];           needCameraApply = true; }
     if (ok("awb", doc["awb"].is<bool>()))         { appConfig.camera.awb          = doc["awb"];           needCameraApply = true; }
     if (ok("bpc", doc["bpc"].is<bool>()))         { appConfig.camera.bpc          = doc["bpc"];           needCameraApply = true; }
@@ -748,12 +788,20 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         }
     }
 
+    if (ok("lens_fov_deg", doc["lens_fov_deg"].is<int>())) { appConfig.lens_fov_deg = clampInt(doc["lens_fov_deg"], 0, 220); needSave = true; }
+    if (ok("lens_ref_fov_deg", doc["lens_ref_fov_deg"].is<int>())) { appConfig.lens_ref_fov_deg = clampInt(doc["lens_ref_fov_deg"], 0, 220); needSave = true; }
+
     // LED
     if (ok("led_enabled", doc["led_enabled"].is<bool>())) { appConfig.led_enabled = doc["led_enabled"]; needSave = true; }
 
     // Frame rates
     if (ok("idle_fps", doc["idle_fps"].is<int>()))   { appConfig.idle_fps   = doc["idle_fps"];   needSave = true; }
     if (ok("active_fps", doc["active_fps"].is<int>())) { appConfig.active_fps = doc["active_fps"]; needSave = true; }
+
+    if (appConfig.lens_fov_deg != prevLensFov || appConfig.camera.lenc != prevLenc ||
+        appConfig.camera.sharpness != prevSharp) {
+        lensProfileClearActive();
+    }
 
     // Sensor writes are handed to the capture task instead of being done here — the
     // async server task must not touch SCCB while a frame grab is in flight.
@@ -1121,6 +1169,82 @@ r();setInterval(r,5000);
     request->send(200, "text/html", LOG_VIEWER_HTML);
 }
 
+// ── Lens profiles API ────────────────────────────────────────────────────────
+static void handleApiLensProfilesGet(AsyncWebServerRequest* request) {
+    JsonDocument doc;
+    JsonArray arr = doc["profiles"].to<JsonArray>();
+    LensProfile p;
+    for (int i = 0; lensProfileGet(i, p); i++) {
+        JsonObject o = arr.add<JsonObject>();
+        o["name"] = p.name;
+        o["fov"] = p.fov;
+        o["lenc"] = p.lenc;
+        o["sharpness"] = p.sharpness;
+    }
+    doc["active"] = lensProfileActive();
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+}
+
+static void handleApiLensProfilesPost(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+    if (!requireAuth(request)) return;
+    if (!requireCsrf(request)) return;
+    if (accumulateJsonBody(request, data, len, index, total) != 1) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, (const uint8_t*)request->_tempObject, total) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+    if (doc["save"].is<const char*>()) {
+        LensProfile p;
+        strlcpy(p.name, doc["save"].as<const char*>(), sizeof(p.name));   // sanitized in the module
+        p.fov = appConfig.lens_fov_deg;
+        p.lenc = appConfig.camera.lenc;
+        p.sharpness = appConfig.camera.sharpness;
+        switch (lensProfileSave(p)) {
+            case LENS_PROFILE_OK: {
+                // The live values now equal this snapshot, so it is the active profile.
+                char clean[LENS_PROFILE_NAME_LEN];
+                lensProfileSanitizeName(p.name, clean);
+                lensProfileSetActive(clean);
+                request->send(200, "application/json", "{\"success\":true}");
+                break;
+            }
+            case LENS_PROFILE_BAD_NAME:
+                request->send(400, "application/json", "{\"error\":\"Invalid name\"}"); break;
+            case LENS_PROFILE_FULL:
+                request->send(409, "application/json", "{\"error\":\"Profile list full (max 4)\"}"); break;
+            default:
+                request->send(500, "application/json", "{\"error\":\"Save failed\"}"); break;
+        }
+        return;
+    }
+    if (doc["apply"].is<const char*>()) {
+        LensProfile p;
+        if (!lensProfileFind(doc["apply"].as<const char*>(), p)) {
+            request->send(404, "application/json", "{\"error\":\"Profile not found\"}");
+            return;
+        }
+        appConfig.lens_fov_deg = p.fov;
+        appConfig.camera.lenc = p.lenc;
+        appConfig.camera.sharpness = p.sharpness;
+        saveConfig();
+        // Sensor registers are written by the capture task, never from this handler.
+        cameraRequestSettingsApply();
+        lensProfileSetActive(p.name);
+        request->send(200, "application/json", "{\"success\":true}");
+        return;
+    }
+    if (doc["delete"].is<const char*>()) {
+        bool removed = lensProfileDelete(doc["delete"].as<const char*>());
+        request->send(removed ? 200 : 404, "application/json",
+                      removed ? "{\"success\":true}" : "{\"error\":\"Profile not found\"}");
+        return;
+    }
+    request->send(400, "application/json", "{\"error\":\"Expected save, apply or delete\"}");
+}
+
 // ── Zone manager API ─────────────────────────────────────────────────────────
 #ifdef INCLUDE_ZONES
 static void handleApiZonesGet(AsyncWebServerRequest* request) {
@@ -1133,6 +1257,13 @@ static void handleApiZonesPost(AsyncWebServerRequest* request, uint8_t* data, si
     JsonDocument doc;
     if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+    // DFR1154 form: {"delete":"<name>"} removes a zone through POST.
+    if (doc["delete"].is<const char*>()) {
+        bool removed = deleteZone(doc["delete"].as<const char*>());
+        request->send(removed ? 200 : 404, "application/json",
+                      removed ? "{\"success\":true,\"ok\":true}" : "{\"error\":\"Zone not found\"}");
         return;
     }
     Zone z;
@@ -1179,6 +1310,8 @@ static void handleApiRoiGet(AsyncWebServerRequest* request) {
     // frame is currently active, so a ROI editor does not have to guess.
     doc["grid_w"] = MOTION_GRID_W;
     doc["grid_h"] = MOTION_GRID_H;
+    doc["w"] = MOTION_GRID_W;      // DFR1154 names for the same two numbers
+    doc["h"] = MOTION_GRID_H;
     #ifdef INCLUDE_MOTION_DETECT
     doc["active_blocks"] = motionDetectRoiActiveBlocks();
     #endif
@@ -1289,6 +1422,15 @@ static void handleHealth(AsyncWebServerRequest* request) {
     doc["capture_errors"] = getCaptureErrors();
     doc["ring_dropped"] = getRingDroppedFrames();
     doc["ring_oversize"] = getOversizeDroppedFrames();
+    doc["heap_health"] = freeHeap > 50000 ? "healthy" : (freeHeap > 30000 ? "warning" : "critical");
+    doc["lens_fov_deg"] = appConfig.lens_fov_deg;
+    doc["sensor"] = "PY260";
+    {
+        int rssi = getRSSI();
+        doc["wifi_quality"] = !isWiFiConnected() ? "disconnected"
+            : rssi >= -50 ? "excellent" : rssi >= -60 ? "good"
+            : rssi >= -70 ? "fair" : rssi >= -80 ? "poor" : "critical";
+    }
     doc["device_name"] = appConfig.wifi.hostname;   // A12 derives esp32cam/<device>/... from it
     doc["frame_age_ms"] = frameAge;
     doc["stream_clients"] = getStreamClientCount();
@@ -1316,6 +1458,23 @@ static void handleHealth(AsyncWebServerRequest* request) {
     String result;
     serializeJson(doc, result);
     request->send(200, "application/json", result);
+}
+
+// GET /motion-status — DFR1154 shape: {enabled, motion_detected, score}.
+// score is the changed-area percentage, rounded: the closest thing this detector has.
+static void handleMotionStatus(AsyncWebServerRequest* request) {
+    JsonDocument doc;
+    doc["enabled"] = appConfig.motion.enabled;
+    #ifdef INCLUDE_MOTION_DETECT
+    doc["motion_detected"] = isMotionDetected();
+    doc["score"] = (int)(getMotionDebugInfo().changed_pct + 0.5f);
+    #else
+    doc["motion_detected"] = false;
+    doc["score"] = 0;
+    #endif
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
 }
 
 static void handleStreamStats(AsyncWebServerRequest* request) {
@@ -1510,6 +1669,8 @@ static void setupApiRoutes() {
 
     server.on("/api/status", HTTP_GET, handleApiStatus);
     server.on("/api/sensor", HTTP_GET, handleApiSensor);
+    server.on("/api/focus", HTTP_GET, handleApiFocus);
+    server.on("/focus", HTTP_GET, handleApiFocus);
     server.on("/api/snapshot", HTTP_GET, handleApiSnapshot);
     server.on("/api/wifi/scan", HTTP_GET, handleApiWifiScan);
     server.on("/api/csrf", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -1555,6 +1716,9 @@ static void setupApiRoutes() {
     server.on("/health", HTTP_GET, handleHealth);
     server.on("/telemetry", HTTP_GET, handleCompatJson);
     server.on("/stream-stats", HTTP_GET, handleStreamStats);
+    server.on("/motion-status", HTTP_GET, handleMotionStatus);
+    server.on("/reg-debug", HTTP_GET, handleApiSensor);          // DFR1154 name for /api/sensor
+    server.on("/wifi-scan", HTTP_GET, handleApiWifiScan);        // DFR1154 name for /api/wifi/scan
     server.on("/a12/status", HTTP_GET, handleA12Status);
     server.on("/api/a12/status", HTTP_GET, handleA12Status);
     server.on("/psram-stats", HTTP_GET, handlePsramStats);
@@ -1583,7 +1747,16 @@ static void setupApiRoutes() {
     server.on("/log", HTTP_GET, handleLog);
     server.on("/log-viewer", HTTP_GET, handleLogViewer);
 
+    server.on("/api/lens-profiles", HTTP_GET, handleApiLensProfilesGet);
+    server.on("/api/lens-profiles", HTTP_POST,
+        [](AsyncWebServerRequest* r) {}, NULL, handleApiLensProfilesPost);
     #ifdef INCLUDE_ZONES
+    server.on("/zones", HTTP_GET, handleApiZonesGet);            // DFR1154 names; delete = POST {"delete":name}
+    server.on("/zones", HTTP_POST,
+        [](AsyncWebServerRequest* request) {}, NULL, handleApiZonesPost);
+    server.on("/roi-mask", HTTP_GET, handleApiRoiGet);
+    server.on("/roi-mask", HTTP_POST,
+        [](AsyncWebServerRequest* r) {}, NULL, handleApiRoiPost);
     server.on("/api/zones", HTTP_GET, handleApiZonesGet);
     server.on("/api/zones", HTTP_POST,
         [](AsyncWebServerRequest* r) {}, NULL, handleApiZonesPost);
@@ -1601,6 +1774,7 @@ static void setupApiRoutes() {
     #ifdef INCLUDE_SD_CARD
     setupSdRoutes();
     server.on("/sd-list", HTTP_GET, handleSdList);
+    server.on("/sd-download", HTTP_GET, handleSdDownload);
     server.on("/save_frame", HTTP_POST, handleSaveFrame);
     #endif
 }

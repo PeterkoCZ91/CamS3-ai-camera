@@ -647,6 +647,16 @@ or MQTT. There is no cloud service, no telemetry and no phone-home.
 **Recommendation:** treat this as a trusted-LAN device. Put it on an isolated
 VLAN or behind an authenticating reverse proxy, and do not port-forward it.
 
+## Swapping the lens
+
+Three pieces work together. Enter the new lens's horizontal FOV as `lens_fov_deg`, then
+focus it by number with `GET /api/focus` (turn until `focus_score` and `peak` stop rising;
+a 1/8-scale decode limits sensitivity to fine defocus). Tune `lenc` and `sharpness` and
+save the three values as a named profile via `/api/lens-profiles` (up to 4) so the next
+swap is one `apply`. If your pixel thresholds were tuned on another lens, set
+`lens_ref_fov_deg` to that lens's FOV and the tracker match distance is rescaled
+automatically (`0` = off). See [`docs/API.md`](docs/API.md).
+
 ## Known limitations
 
 | Item | State |
@@ -654,6 +664,7 @@ VLAN or behind an authenticating reverse proxy, and do not port-forward it.
 | Face detection | Off by default. `HumanFaceDetectMSR01` comes from esp-dl's deprecated `dl_lib` API — arduino-esp32 removed those headers in v3.1+, so the pinned core is the last one that compiles it — and it costs ~660 kB of flash. A `LoadStoreError` panic was also observed on this hardware with it enabled; see [`docs/known_issues.md`](docs/known_issues.md) for the signature and what is and is not verified. Code kept and building; one line to re-enable. Migration target: a FOMO face model. |
 | Capture resolution | The sensor is 5 MP, but the firmware runs UXGA 1600×1200 (`frame_size 13`). The PY260 driver in the Arduino core cannot sustain capture at QSXGA — it yields 0 fps and errors. Decode buffers are nevertheless sized for QSXGA/8 so no `frame_size` can overflow them. |
 | Audio | The PDM microphone pins are in `board_config.h`, but there is no I²S code. `/audio-status` returns `available: false`. |
+| Sibling-API gaps | Compared with the DFR1154 firmware, `/sd-clear`, `/sd-log`, `/wifi-save`, RTSP and audio are not implemented. For A12 set `AUDIO_ENABLED=false` and `camera_profiles.apply_from_a12=false` (`ambient_light_lux` is frame brightness, not lux). |
 | AVI recording | `AviWriter` (RIFF/AVI 1.0 MJPEG muxer) is implemented and unit-clean, but nothing calls it. `POST /record` returns HTTP 501. `INCLUDE_AVI_WRITER` currently has no effect. |
 | IR illuminator | `/ir-status` and `/ir-control` are compatibility stubs reporting `available: false`; the board has no IR LED. |
 | `curl` and gzipped assets | The static handler does not check `Accept-Encoding`, so `curl http://<camera-ip>/style.css` returns raw gzip. Use `curl --compressed`. API endpoints are unaffected. |

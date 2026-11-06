@@ -5,6 +5,14 @@ service that does the heavy detection off-device: it consumes the camera's MJPEG
 stream continuously and runs its own models (a YOLO-class detector over the COCO
 classes, optional face recognition, and a vision model for scene descriptions).
 
+## 0. Required A12 settings for this camera
+
+- Set A12 `AUDIO_ENABLED=false`. This firmware has no microphone code, so A12 would
+  otherwise poll `/audio-status` and try `/audio.wav` on port 82.
+- Keep `camera_profiles.apply_from_a12=false`. There is no light sensor:
+  `ambient_light_lux` here is the mean frame brightness (0-255), not lux, so A12's lux
+  thresholds do not apply.
+
 ## Where A12 is
 
 A12 is Python, and it lives in the sibling repository — not in this one:

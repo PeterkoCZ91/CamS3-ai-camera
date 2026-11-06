@@ -42,6 +42,25 @@ static void compactTracks() {
     trackCount = write;
 }
 
+// Pixel thresholds were tuned on a reference lens. A wider lens shrinks objects
+// on the sensor (a narrower one enlarges them) roughly in proportion to
+// tan(fov/2), so the same physical motion spans fewer/more pixels. Opt-in:
+// either FOV being 0 (unknown/off) returns exactly 1.0, keeping old behaviour.
+float lensScale() {
+    int fov = appConfig.lens_fov_deg;
+    int ref = appConfig.lens_ref_fov_deg;
+    if (fov <= 0 || ref <= 0) return 1.0f;
+    // tan() blows up at 180 deg (and the settings accept up to 220), so cap the
+    // angles where a rectilinear projection still means something.
+    if (fov > 170) fov = 170;
+    if (ref > 170) ref = 170;
+    const float k = 0.01745329252f * 0.5f;  // deg -> rad, halved
+    float s = tanf(ref * k) / tanf(fov * k);
+    if (!(s >= 0.5f)) s = 0.5f;             // also catches NaN
+    if (s > 2.0f) s = 2.0f;
+    return s;
+}
+
 int trackerUpdate(const Detection* detections, int numDetections) {
     if (numDetections > TRACKER_MAX_DETECTIONS) {
         numDetections = TRACKER_MAX_DETECTIONS;
@@ -51,6 +70,9 @@ int trackerUpdate(const Detection* detections, int numDetections) {
     int matchDist   = appConfig.tracker.match_dist   > 0 ? appConfig.tracker.match_dist   : TRACKER_MATCH_DIST_DEFAULT;
     int confirmHits = appConfig.tracker.confirm_hits > 0 ? appConfig.tracker.confirm_hits : TRACKER_CONFIRM_HITS_DEFAULT;
     int maxMisses   = appConfig.tracker.max_misses   > 0 ? appConfig.tracker.max_misses   : TRACKER_MAX_MISSES_DEFAULT;
+    // Scale only when opted in; the guard keeps the default path integer-exact.
+    float ls = lensScale();
+    if (ls != 1.0f) matchDist = (int)(matchDist * ls + 0.5f);
     int maxDistSq = matchDist * matchDist;
 
     // --- Greedy nearest-neighbor matching ---

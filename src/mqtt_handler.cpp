@@ -75,6 +75,12 @@ static void mqttQueuePush(const char* topic, const char* payload, size_t len, bo
     if (mqttQueueCount < MQTT_QUEUE_CAP) mqttQueueCount++;
 }
 
+// Link counters for /status. Written by the mqtt task, read by the web server;
+// single-word values, so a torn read cannot happen on this core.
+static volatile uint32_t mqttConnects = 0;
+static volatile uint32_t mqttFailures = 0;
+static volatile uint32_t mqttLinkUpSinceMs = 0;
+
 static void mqttQueueFlush() {
     if (!mqttQueue || mqttQueueCount == 0 || !mqttClient.connected()) return;
     int idx = (mqttQueueHead - mqttQueueCount + MQTT_QUEUE_CAP) % MQTT_QUEUE_CAP;
@@ -393,6 +399,8 @@ static bool mqttConnect() {
     }
 
     if (ok) {
+        mqttConnects++;
+        mqttLinkUpSinceMs = millis();
         logCapture("[%s] Connected to %s:%d\n", TAG,
                       appConfig.mqtt.server.c_str(), appConfig.mqtt.port);
 
@@ -411,6 +419,7 @@ static bool mqttConnect() {
         // Drain any publications that were queued while we were offline.
         mqttQueueFlush();
     } else {
+        mqttFailures++;
         logCapture("[%s] Connection failed\n", TAG);
     }
 
@@ -630,3 +639,13 @@ void mqttTask(void* param) {
 }
 
 #endif // INCLUDE_MQTT
+
+MqttLinkStats mqttGetLinkStats() {
+    MqttLinkStats s;
+    bool up = mqttClient.connected();
+    s.state = up ? 0 : -1;
+    s.connects = mqttConnects;
+    s.failures = mqttFailures;
+    s.link_uptime_s = up ? (millis() - mqttLinkUpSinceMs) / 1000 : 0;
+    return s;
+}

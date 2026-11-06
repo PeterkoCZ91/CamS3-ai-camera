@@ -6,6 +6,9 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <esp_task_wdt.h>
+#ifdef INCLUDE_MOTION_DETECT
+#include "motion_detect.h"
+#endif
 
 static const char* TAG = "CameraMgr";
 
@@ -98,6 +101,50 @@ static volatile bool reinitRequested = false;
 static bool captureWantedAfterReinit = false;
 // Deferred sensor-settings apply, consumed by the capture task between frames.
 static volatile bool settingsApplyRequested = false;
+
+// Auto night profile. State is written only by the capture task; the volatile flag
+// is read by applyConfigToCamera() (same task) and /status (display only).
+static volatile bool nightProfile = false;
+bool cameraNightProfileActive() { return nightProfile; }
+
+#ifdef INCLUDE_MOTION_DETECT
+// AEC regulates brightness, so only a genuinely dark scene stays low. Wide
+// hysteresis plus a long dwell keep the overlay's own brightening from flapping.
+#define NIGHT_ENTER_BRIGHTNESS 15.0f
+#define NIGHT_LEAVE_BRIGHTNESS 25.0f
+#define NIGHT_DWELL_MS         60000UL
+
+static void autoProfileTick() {
+    static bool     wasEnabled   = false;
+    static bool     pending      = false;   // opposite state seen, dwell running
+    static uint32_t pendingSince = 0;
+
+    if (!appConfig.camera.auto_profile) {
+        // Feature turned off: drop the overlay .
+        // Order matters: the settings apply may have run just before this tick with
+        // the overlay still on, so re-apply once to actually remove it.
+        pending = false;
+        wasEnabled = false;
+        if (nightProfile) { nightProfile = false; applyConfigToCamera(false); }
+        return;
+    }
+    if (!wasEnabled) { wasEnabled = true; pending = false; }
+
+    MotionDebugInfo mdi = getMotionDebugInfo();
+    float b = mdi.avg_brightness;
+    bool wantOpposite = nightProfile ? (b > NIGHT_LEAVE_BRIGHTNESS)
+                                     : (b < NIGHT_ENTER_BRIGHTNESS);
+    if (!wantOpposite) { pending = false; return; }
+    if (!pending) { pending = true; pendingSince = millis(); return; }
+    if (millis() - pendingSince < NIGHT_DWELL_MS) return;
+
+    pending = false;
+    nightProfile = !nightProfile;
+    logCapture("[%s] Auto profile -> %s (brightness %.1f)\n", TAG,
+               nightProfile ? "NIGHT" : "DAY", b);
+    applyConfigToCamera(false);
+}
+#endif
 
 // ---- Read-only live sensor register view (GET /api/sensor) -------------------
 // Register reads go over SCCB, so they happen ONLY in the capture task, in the same
@@ -427,6 +474,11 @@ static void captureTask(void* param) {
             settingsApplyRequested = false;
             applyConfigToCamera(false);
         }
+
+#ifdef INCLUDE_MOTION_DETECT
+        // Same idle window: decide DAY/NIGHT here, never in an HTTP handler (SCCB).
+        autoProfileTick();
+#endif
 
         // Same idle SCCB window: refresh the read-only register view.
         if (sensorOneShotPending || (captureCount % SENSOR_SAMPLE_EVERY) == 0) {

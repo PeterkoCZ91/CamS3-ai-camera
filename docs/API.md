@@ -155,6 +155,7 @@ dropping one breaks a monitor that cannot report that it went blind.
 
 | Field | Meaning |
 |---|---|
+| `heap_health`, `wifi_quality`, `lens_fov_deg`, `sensor` | Added for parity with the DFR1154 `/health`: heap and Wi-Fi quality labels, configured lens FOV, sensor name (`PY260`) |
 | `ok` / `overall_health` | `false` / `"degraded"` when `issues` is non-empty |
 | `issues` | Semicolon-separated list of concrete complaints: `wifi down`, `no frame captured since boot`, `stale frame (>10s)`, `capture stalled` (not raised in the first ~5 s after boot, nor while frames are fresh), `frames being dropped` (`ring_dropped` grew since the previous `/health` poll), `low heap`, `sd writes disabled`. Empty when healthy. |
 | `uptime_sec`, `uptime_seconds` | The same value under both names |
@@ -407,6 +408,9 @@ anyone touched an unrelated slider. To actually erase them use
 | `http_pass` | string | 4 … 64 chars | **Empty = unchanged.** Anything shorter than 4 chars is ignored, not rejected. Written to encrypted NVS immediately |
 | `hostname` | string | 1 … 32 chars | Applied on next boot (mDNS/DHCP name) |
 | `led_enabled` | bool | – | Status LED |
+| `lens_fov_deg` | int | 0 … 220 | Horizontal FOV of the fitted lens, owner-entered (0 = unknown) |
+| `lens_ref_fov_deg` | int | 0 … 220 | FOV the pixel thresholds were tuned for; `0` = off. With `lens_fov_deg` also set, the tracker scales `tracker_match_dist` by `tan(ref/2)/tan(fov/2)`, clamped to 0.5 … 2 (both angles capped at 170). Only the match distance is scaled |
+| `auto_profile` | bool | – | Opt-in (default off). Switches to a NIGHT exposure overlay (ae_level +1, aec2 on, gainceiling +1) after the mean frame brightness stays below 15 for 60 s, and back above 25. `/api/status` `camera_profile` then reports the real DAY/NIGHT. Needs motion detection; untested on PY260 hardware |
 | `idle_fps` | int | **not clamped** | Capture rate with no stream client |
 | `active_fps` | int | **not clamped** | Capture rate while streaming |
 
@@ -434,7 +438,42 @@ to 3 seconds, so the reinit is queued and executed by the main loop. If the came
 cannot be recovered after `MAX_FAILED_REINITS` (3) attempts the firmware reboots
 itself.
 
-### 5.4 WiFi
+#### Focus score
+
+| Method | Path | Auth | CSRF | Response |
+| --- | --- | --- | --- | --- |
+| GET | `/api/focus` | no | – | `{"focus_score":123.45,"peak":150.00,"age_ms":210,"valid":true}` |
+| GET | `/focus` | no | – | Alias |
+
+`focus_score` is the variance of the 4-neighbour Laplacian over the centre crop of the
+grayscale frame (higher = sharper); `peak` is the maximum since the session's first
+request or last reset; `age_ms` is the time since `focus_score` was computed; `valid` is
+`false` until the session's first sample exists. The worker is on demand: the first
+request starts a session (answers `valid:false`), it then samples every ~500 ms and
+stops 10 s after the last request, so poll about twice a second while turning the lens.
+`?reset=1` clears `peak`. Intended use: focusing a manual lens by number (turn until the
+score and `peak` stop rising). Limit: the score comes from a 1/8-scale decode, which is
+only weakly sensitive to fine defocus; use it for coarse-to-medium focus, not for the
+last fraction of a turn.
+
+#### Lens profiles
+
+| Method | Path | Auth | CSRF | Response |
+| --- | --- | --- | --- | --- |
+| GET | `/api/lens-profiles` | no | – | `{"profiles":[{"name","fov","lenc","sharpness"}],"active":"name"}` |
+| POST | `/api/lens-profiles` | **yes** | **yes** | `{"success":true}` |
+
+POST takes exactly one of `{"save":"<name>"}`, `{"apply":"<name>"}`, `{"delete":"<name>"}`.
+A profile bundles `lens_fov_deg`, `camera.lenc` and `camera.sharpness`.
+`save` snapshots the current live values (same name overwrites; names are reduced to
+`[A-Za-z0-9 _.-]` and cut to 16 characters) and marks it active; at most 4 profiles are
+kept in `/lens_profiles.json` (`409` when full, `400` for an unusable name). `apply`
+writes the three values, persists the config and queues a sensor settings update
+(`404` if unknown). `delete` returns `404` if unknown. `active` is RAM-only: it is the
+last saved/applied profile, is lost on reboot, and is cleared when any of the three
+values is edited by hand. No presets are shipped.
+
+### 5.4 WiFi### 5.4 WiFi
 
 | Method | Path | Auth | CSRF | Body / params |
 | --- | --- | --- | --- | --- |
@@ -785,6 +824,12 @@ A12 integration keeps working. They are thin aliases — same handler, same resp
 | `/frame` | GET | `/api/snapshot` |
 | `/snapshot` | GET | `/api/snapshot` |
 | `/motion-debug` | GET | `/api/motion/debug` |
+| `/motion-status` | GET | Returns `{enabled, motion_detected, score}` |
+| `/zones` | GET / POST | `/api/zones`; POST also accepts `{"delete":"<name>"}` |
+| `/roi-mask` | GET / POST | `/api/roi`; GET also returns `w`, `h` |
+| `/reg-debug` | GET | `/api/sensor` |
+| `/wifi-scan` | GET | `/api/wifi/scan` |
+| `/sd-download` | GET | `/api/sd/download` |
 | `/events` | GET | `/api/events` |
 | `/sd-list` | GET | `/api/sd/list` |
 | `/a12/status` | GET | `/api/a12/status` (both registered) |
@@ -797,6 +842,9 @@ A12 integration keeps working. They are thin aliases — same handler, same resp
 | `/record` | POST | No `/api/` equivalent (`501`) |
 | `/ir-status`, `/ir-control`, `/audio-status` | GET / POST / GET | Stubs, no equivalent |
 | `/log`, `/log-viewer` | GET | No `/api/` equivalent |
+
+Not implemented here, unlike the DFR1154 sibling: `/sd-clear`, `/sd-log`, `/wifi-save`,
+RTSP and audio.
 
 Prefer the `/api/**` form for new integrations: it gets unconditional CSRF
 enforcement, and the aliases are the part of the surface most likely to be dropped.
@@ -1008,6 +1056,11 @@ Without `-DINCLUDE_PERSON_DETECT` the live keys are still emitted, as
 | --- | --- | --- |
 | `led_enabled` | bool | Status LED |
 | `default_password` | bool | `true` while `http_pass` is still `DEFAULT_HTTP_PASS`; drives the warning banner in the UI |
+| `sensor` | string | Sensor name, `"PY260"` (also in `/health`) |
+| `lens_fov_deg` | int | Lens field of view, 0-220, `0` = unknown. Settable via `POST /api/settings` or `/settings`, persisted (also in `/health`) |
+| `uptime_days`, `uptime_hours` | int | Days, and the hour part (0-23) of the uptime |
+| `mqtt_state` | int | `0` connected, `-1` disconnected |
+| `mqtt_connects`, `mqtt_failures`, `mqtt_link_uptime_s` | int | MQTT connection counters and seconds since the current link came up |
 | `ambient_light_lux` | float | **Misnamed**: this is the motion detector's average frame brightness, 0–255, not lux. `0` without `-DINCLUDE_MOTION_DETECT` |
 | `camera_profile` | string | Derived from the above: `NIGHT` (< 15), `DUSK` (< 40), else `DAY` |
 | `ir_led` | bool | **stub**, always `false` — no IR LED on this board |

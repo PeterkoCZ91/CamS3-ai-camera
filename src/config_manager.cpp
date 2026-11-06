@@ -280,6 +280,7 @@ bool loadConfig() {
         appConfig.camera.aec          = cam["aec"]           | d.aec;
         appConfig.camera.aec2         = cam["aec2"]          | d.aec2;
         appConfig.camera.agc          = cam["agc"]           | d.agc;
+        appConfig.camera.auto_profile = cam["auto_profile"]  | d.auto_profile;
         appConfig.camera.awb          = cam["awb"]           | d.awb;
         appConfig.camera.bpc          = cam["bpc"]           | d.bpc;
         appConfig.camera.wpc          = cam["wpc"]           | d.wpc;
@@ -388,6 +389,8 @@ bool loadConfig() {
 
     // Misc
     appConfig.led_enabled = doc["led_enabled"] | true;
+    appConfig.lens_fov_deg = constrain((int)(doc["lens_fov_deg"] | 0), 0, 220);
+    appConfig.lens_ref_fov_deg = constrain((int)(doc["lens_ref_fov_deg"] | 0), 0, 220);
     appConfig.idle_fps    = doc["idle_fps"]    | 1;
     appConfig.active_fps  = doc["active_fps"]  | 15;
 
@@ -421,6 +424,7 @@ bool saveConfig() {
     cam["aec"]           = appConfig.camera.aec;
     cam["aec2"]          = appConfig.camera.aec2;
     cam["agc"]           = appConfig.camera.agc;
+    cam["auto_profile"]  = appConfig.camera.auto_profile;
     cam["awb"]           = appConfig.camera.awb;
     cam["bpc"]           = appConfig.camera.bpc;
     cam["wpc"]           = appConfig.camera.wpc;
@@ -507,6 +511,8 @@ bool saveConfig() {
 
     // Misc
     doc["led_enabled"] = appConfig.led_enabled;
+    doc["lens_fov_deg"] = appConfig.lens_fov_deg;
+    doc["lens_ref_fov_deg"] = appConfig.lens_ref_fov_deg;
     doc["idle_fps"]    = appConfig.idle_fps;
     doc["active_fps"]  = appConfig.active_fps;
 
@@ -635,6 +641,15 @@ void applyConfigToCamera(bool applyFrameSize) {
     s->set_wpc(s, appConfig.camera.wpc ? 1 : 0);
     s->set_raw_gma(s, appConfig.camera.raw_gma ? 1 : 0);
     s->set_lenc(s, appConfig.camera.lenc ? 1 : 0);
+
+    // Night overlay goes last and only touches the sensor, never appConfig, so the
+    // stored user settings survive and switching back to DAY is just a re-apply.
+    // Kept moderate on purpose: brighter frames feed back into the DAY/NIGHT signal.
+    if (appConfig.camera.auto_profile && cameraNightProfileActive()) {
+        s->set_ae_level(s, constrain(appConfig.camera.ae_level + 1, -2, 2));
+        s->set_aec2(s, 1);
+        s->set_gainceiling(s, (gainceiling_t)constrain(appConfig.camera.gainceiling + 1, 0, 6));
+    }
 
     logCapture("[%s] Camera settings applied\n", TAG);
 }
