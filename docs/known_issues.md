@@ -115,7 +115,7 @@ missing headers are still `#include`d inside the `#ifdef` branch.
 
 ## 2. Resolutions above UXGA do not work
 
-The sensor is a 5 MP PY260 and `POST /api/settings` clamps `frame_size` to
+The sensor is documented as a 5 MP PY260 (one tested unit reported OV3660, PID 0x3660) and `POST /api/settings` clamps `frame_size` to
 `FRAMESIZE_QVGA` … `FRAMESIZE_UXGA`, i.e. **5 … 13** (QVGA … UXGA 1600×1200);
 14–21 are rejected by the clamp because a persisted one can boot-loop the device
 (a value already stored in an old `/config.json` is not touched by this change).

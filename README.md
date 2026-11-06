@@ -49,7 +49,7 @@ listed honestly in [Known limitations](#known-limitations).
 | MCU | ESP32-S3-WROOM-1-N16R8 (built as `esp32-s3-devkitc-1`) |
 | Flash | 16 MB, QIO |
 | PSRAM | 8 MB, **OPI** (`board_build.arduino.memory_type = qio_opi`) |
-| Sensor | PY260, 5 MP (OV5640 derivative) |
+| Sensor | Documented as PY260, 5 MP (OV5640 derivative); the unit tested here reports PID 0x3660 (OV3660, 3 MP). `/status` `sensor` shows what the unit actually has |
 | Default capture size | `FRAMESIZE_UXGA` 1600×1200, JPEG quality 8 |
 | Storage | microSD over SPI |
 | Extras on board | white LED, PDM microphone |

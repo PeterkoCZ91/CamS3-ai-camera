@@ -40,6 +40,8 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 
 ### Fixed
 
+- `/status` and `/health` `sensor` is now derived from the sensor PID the driver
+  read instead of a hard-coded "PY260" (a unit reporting 0x3660 is an OV3660).
 - **The brownout detector was switched off.** `WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0x10000)`
   clears the enable bits on the ESP32-S3, the opposite of its comment. A supply sag now
   gives a clean `BROWNOUT` reset instead of a lock-up or a power-on reset that hides the cause.

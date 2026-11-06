@@ -214,6 +214,20 @@ static String streamBaseUrl() {
     return httpBaseUrl() + ":" + String(STREAM_PORT);
 }
 
+// Name the fitted sensor from the PID the driver actually read. A hard-coded
+// "PY260" was wrong on a unit that reports 0x3660 (OV3660) — the board is documented
+// with a PY260, but the chip on a given unit is what the sensor says it is.
+static const char* sensorNameFromPid() {
+    sensor_t* s = esp_camera_sensor_get();
+    if (!s) return "unknown";
+    switch (s->id.PID) {
+        case 0x3660: return "OV3660";
+        case 0x5640: return "OV5640";
+        case 0x2640: return "OV2640";
+        default:     return "PY260";   // the Unit CamS3's documented sensor
+    }
+}
+
 // Build status JSON (shared by /api/status and WebSocket)
 static String buildStatusJson() {
     JsonDocument doc;
@@ -402,7 +416,7 @@ static String buildStatusJson() {
     doc["uptime_seconds"] = millis() / 1000;
     doc["uptime_days"]    = (millis() / 1000) / 86400;
     doc["uptime_hours"]   = ((millis() / 1000) % 86400) / 3600;   // hour part, as on the DFR1154
-    doc["sensor"]         = "PY260";
+    doc["sensor"]         = sensorNameFromPid();
     doc["lens_fov_deg"]   = appConfig.lens_fov_deg;
     doc["lens_ref_fov_deg"] = appConfig.lens_ref_fov_deg;
     doc["max_alloc_heap"] = ESP.getMaxAllocHeap();
@@ -1424,7 +1438,7 @@ static void handleHealth(AsyncWebServerRequest* request) {
     doc["ring_oversize"] = getOversizeDroppedFrames();
     doc["heap_health"] = freeHeap > 50000 ? "healthy" : (freeHeap > 30000 ? "warning" : "critical");
     doc["lens_fov_deg"] = appConfig.lens_fov_deg;
-    doc["sensor"] = "PY260";
+    doc["sensor"] = sensorNameFromPid();
     {
         int rssi = getRSSI();
         doc["wifi_quality"] = !isWiFiConnected() ? "disconnected"

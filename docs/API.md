@@ -155,7 +155,7 @@ dropping one breaks a monitor that cannot report that it went blind.
 
 | Field | Meaning |
 |---|---|
-| `heap_health`, `wifi_quality`, `lens_fov_deg`, `sensor` | Added for parity with the DFR1154 `/health`: heap and Wi-Fi quality labels, configured lens FOV, sensor name (`PY260`) |
+| `heap_health`, `wifi_quality`, `lens_fov_deg`, `sensor` | Added for parity with the DFR1154 `/health`: heap and Wi-Fi quality labels, configured lens FOV, sensor name derived from the PID the driver read (`OV3660`, `OV5640`, `OV2640`, else `PY260`) |
 | `ok` / `overall_health` | `false` / `"degraded"` when `issues` is non-empty |
 | `issues` | Semicolon-separated list of concrete complaints: `wifi down`, `no frame captured since boot`, `stale frame (>10s)`, `capture stalled` (not raised in the first ~5 s after boot, nor while frames are fresh), `frames being dropped` (`ring_dropped` grew since the previous `/health` poll), `low heap`, `sd writes disabled`. Empty when healthy. |
 | `uptime_sec`, `uptime_seconds` | The same value under both names |
@@ -1056,7 +1056,7 @@ Without `-DINCLUDE_PERSON_DETECT` the live keys are still emitted, as
 | --- | --- | --- |
 | `led_enabled` | bool | Status LED |
 | `default_password` | bool | `true` while `http_pass` is still `DEFAULT_HTTP_PASS`; drives the warning banner in the UI |
-| `sensor` | string | Sensor name, `"PY260"` (also in `/health`) |
+| `sensor` | string | Sensor name from the detected PID: `"OV3660"`, `"OV5640"`, `"OV2640"`, otherwise `"PY260"` (also in `/health`) |
 | `lens_fov_deg` | int | Lens field of view, 0-220, `0` = unknown. Settable via `POST /api/settings` or `/settings`, persisted (also in `/health`) |
 | `uptime_days`, `uptime_hours` | int | Days, and the hour part (0-23) of the uptime |
 | `mqtt_state` | int | `0` connected, `-1` disconnected |
