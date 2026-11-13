@@ -40,6 +40,12 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 
 ### Fixed
 
+- **Permanent boot loop once the event log passed 100 lines.** Rotating
+  `/events.jsonl` copied the whole ring (5.6 kB) onto the stack of whichever task
+  logged the event; the motion task (6 kB) overflowed, and so did `setup()` on
+  every following boot because the file was never rewritten. The snapshot now
+  lives on the heap. A unit hit this in the field and crashed ~51,000 times
+  before it was caught.
 - `/status` and `/health` `sensor` is now derived from the sensor PID the driver
   read instead of a hard-coded "PY260" (a unit reporting 0x3660 is an OV3660).
 - **The brownout detector was switched off.** `WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0x10000)`

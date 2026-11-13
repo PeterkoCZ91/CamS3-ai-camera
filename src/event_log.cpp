@@ -5,6 +5,7 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <esp_heap_caps.h>
 
 #define EVENTS_FILE "/events.jsonl"
 
@@ -48,22 +49,33 @@ static void writeLine(File& f, const EventEntry& e) {
 
 // Rewrite the file from the in-RAM ring, which by definition already holds exactly
 // the newest EVENT_LOG_SIZE entries. No read-back, no tail parsing.
+//
+// The snapshot (EVENT_LOG_SIZE * sizeof(EventEntry) = 5.6 kB) must NOT live on the
+// stack: rotation runs from whichever task logged the event (motion: 6 kB stack) and
+// at boot from setup() inside loopTask (8 kB, already deep). On the stack it tripped
+// the canary, the panic hit before the file was rewritten, so every following boot
+// found the file still over the cap and crashed again — a permanent boot loop
+// (2026-11-11, ~51k panics before it was caught).
 static void rotateFile() {
-    EventEntry snapshot[EVENT_LOG_SIZE];
+    EventEntry* snapshot = (EventEntry*)heap_caps_malloc(
+        sizeof(EventEntry) * EVENT_LOG_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!snapshot) snapshot = (EventEntry*)malloc(sizeof(EventEntry) * EVENT_LOG_SIZE);
+    if (!snapshot) return;  // try again on the next event; better than crashing
     int count, head;
     portENTER_CRITICAL(&ring_mux);
     count = ring_count;
     head  = ring_head;
-    memcpy(snapshot, ring, sizeof(snapshot));
+    memcpy(snapshot, ring, sizeof(EventEntry) * EVENT_LOG_SIZE);
     portEXIT_CRITICAL(&ring_mux);
 
     File w = LittleFS.open(EVENTS_FILE, "w");
-    if (!w) return;
+    if (!w) { free(snapshot); return; }
     int start = (count < EVENT_LOG_SIZE) ? 0 : head;
     for (int i = 0; i < count; i++) {
         writeLine(w, snapshot[(start + i) % EVENT_LOG_SIZE]);
     }
     w.close();
+    free(snapshot);
     file_lines = count;
 }
 
