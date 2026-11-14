@@ -40,6 +40,7 @@ All notable changes to this firmware. Versions follow semantic versioning, where
   AP mode can join the network without a phone.
 
 ### Fixed
+- Recurring panics every 20-90 minutes (`Stack canary watchpoint triggered (cam_task)`): the camera driver's `cam_task` has a fixed 2 kB stack inside the prebuilt esp32-camera library, and logging a backed-up frame queue (`FBQ-RCV`/`FBQ-SND`) through the esp-insights hook and `vprintf` overflowed it. The `cam_hal` log tag is now silenced before `esp_camera_init()`; dropped frames are still counted.
 - OTA updates now reboot into the new image: `ElegantOTA.loop()` was never called (a comment said otherwise), so a successful upload only took effect after the next power cycle or crash.
 
 - **Permanent boot loop once the event log passed 100 lines.** Rotating

@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <esp_task_wdt.h>
+#include <esp_log.h>
 #ifdef INCLUDE_MOTION_DETECT
 #include "motion_detect.h"
 #endif
@@ -306,6 +307,17 @@ bool cameraInit() {
         config.fb_location  = CAMERA_FB_IN_DRAM;
         logCapture("[%s] WARNING: No PSRAM, using limited config\n", TAG);
     }
+
+    // Silence the driver's own logging before it starts cam_task. cam_task runs on a
+    // 2 kB stack fixed inside the prebuilt esp32-camera library, and its ESP_LOGE
+    // calls (FBQ-RCV / FBQ-SND / FB-SIZE when the frame queue backs up) go through
+    // the esp-insights log hook and newlib vprintf, which together need more than
+    // that. The core dump of the recurring 2026-11 panics showed exactly this:
+    // cam_task -> esp_log_write -> vprintf -> lazy lock init, 12 bytes of stack left,
+    // canary tripped. With the tag at NONE the level check returns before vprintf.
+    // Nothing is lost: a backed-up queue is a dropped frame, and those are counted
+    // in `ring_dropped` / capture errors already.
+    esp_log_level_set("cam_hal", ESP_LOG_NONE);
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
