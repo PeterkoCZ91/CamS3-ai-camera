@@ -45,6 +45,10 @@
 #include "event_log.h"
 #endif
 
+#ifdef INCLUDE_OTA
+#include <ElegantOTA.h>
+#endif
+
 #include "ws_log.h"
 #include "system_stats.h"
 
@@ -476,7 +480,13 @@ void loop() {
     healthWatchdog();
     webSocketBroadcastStatus();
 
-    // Note: ElegantOTA.loop() is called in web_server via the ESPAsyncWebServer
+    #ifdef INCLUDE_OTA
+    // ElegantOTA only *requests* the post-update reboot; the restart itself happens
+    // here, two seconds later. Without this call (an old comment claimed the async
+    // server did it — it does not) an OTA flashed fine but the new image only ran
+    // after the next power cycle or crash.
+    ElegantOTA.loop();
+    #endif
 
     // Small delay to prevent WDT reset
     delay(10);

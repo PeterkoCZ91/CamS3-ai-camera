@@ -11,6 +11,8 @@
 #include <WiFi.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_core_dump.h>
+#include <esp_flash.h>
 
 #ifdef INCLUDE_OTA
 #include <ElegantOTA.h>
@@ -960,6 +962,92 @@ static void handleApiReset(AsyncWebServerRequest* request) {
     scheduleReboot();
 }
 
+// --- Core dump over HTTP -------------------------------------------------
+//
+// The panic handler writes an ELF core dump to the `coredump` partition, but until
+// now the only way to read it was esptool over USB — which means taking the camera
+// off the wall. A camera that panics every hour or so in place is exactly the case
+// where that is not practical, so expose it here.
+//
+// GET  /api/coredump/summary  task, PC, backtrace — enough for addr2line
+// GET  /api/coredump          raw dump, for `esp-coredump info_corefile`
+// POST /api/coredump/erase    clear it, so the next crash is not confused with this one
+
+static void handleApiCoredumpSummary(AsyncWebServerRequest* request) {
+    if (!requireAuth(request)) return;
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+        request->send(404, "application/json", "{\"present\":false}");
+        return;
+    }
+    // ~200 bytes; keep it off the async task's small stack.
+    esp_core_dump_summary_t* s = (esp_core_dump_summary_t*)calloc(1, sizeof(esp_core_dump_summary_t));
+    if (!s) { request->send(500, "application/json", "{\"error\":\"no memory\"}"); return; }
+
+    JsonDocument doc;
+    doc["present"] = true;
+    doc["size"]    = (uint32_t)size;
+    if (esp_core_dump_get_summary(s) == ESP_OK) {
+        char hex[11];
+        doc["task"] = s->exc_task;
+        snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s->exc_pc);
+        doc["pc"] = hex;
+        doc["exc_cause"] = s->ex_info.exc_cause;
+        snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s->ex_info.exc_vaddr);
+        doc["exc_vaddr"] = hex;
+        doc["bt_corrupted"] = s->exc_bt_info.corrupted;
+        JsonArray bt = doc["backtrace"].to<JsonArray>();
+        uint32_t depth = s->exc_bt_info.depth;
+        if (depth > 16) depth = 16;
+        for (uint32_t i = 0; i < depth; i++) {
+            snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s->exc_bt_info.bt[i]);
+            bt.add(hex);
+        }
+        // Lets the reader pick the matching ELF; a dump decoded against the wrong
+        // build gives confident nonsense.
+        char sha[APP_ELF_SHA256_SZ + 1];
+        memcpy(sha, s->app_elf_sha256, APP_ELF_SHA256_SZ);
+        sha[APP_ELF_SHA256_SZ] = 0;
+        doc["app_elf_sha256"] = sha;
+    } else {
+        doc["summary_error"] = "dump present but unreadable (corrupt or checksum mismatch)";
+    }
+    free(s);
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+}
+
+static void handleApiCoredumpDownload(AsyncWebServerRequest* request) {
+    if (!requireAuth(request)) return;
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+        request->send(404, "application/json", "{\"present\":false}");
+        return;
+    }
+    // Streamed straight from flash in whatever chunk the TCP stack asks for: the
+    // dump is up to 64 kB and must not be buffered in RAM.
+    AsyncWebServerResponse* resp = request->beginResponse(
+        "application/octet-stream", size,
+        [addr, size](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            if (index >= size) return 0;
+            size_t n = size - index;
+            if (n > maxLen) n = maxLen;
+            if (esp_flash_read(NULL, buf, addr + index, n) != ESP_OK) return 0;
+            return n;
+        });
+    resp->addHeader("Content-Disposition", "attachment; filename=\"coredump.elf\"");
+    request->send(resp);
+}
+
+static void handleApiCoredumpErase(AsyncWebServerRequest* request) {
+    if (!requireAuth(request)) return;
+    if (!requireCsrf(request)) return;
+    esp_err_t err = esp_core_dump_image_erase();
+    request->send(err == ESP_OK ? 200 : 500, "application/json",
+                  err == ESP_OK ? "{\"success\":true}" : "{\"success\":false}");
+}
+
 // API: POST /api/secrets/clear?target=telegram|mqtt
 // Explicit way to erase stored credentials, now that an empty field in the
 // settings form means "leave unchanged" rather than "delete".
@@ -1699,6 +1787,10 @@ static void setupApiRoutes() {
     server.on("/api/reset", HTTP_POST, handleApiReset);
     server.on("/api/camera/reinit", HTTP_POST, handleApiCameraReinit);
     server.on("/api/secrets/clear", HTTP_POST, handleApiSecretsClear);
+    // Registered before /api/coredump: the async server matches by prefix.
+    server.on("/api/coredump/summary", HTTP_GET, handleApiCoredumpSummary);
+    server.on("/api/coredump/erase", HTTP_POST, handleApiCoredumpErase);
+    server.on("/api/coredump", HTTP_GET, handleApiCoredumpDownload);
 
     // Settings (POST with JSON body)
     server.on("/api/settings", HTTP_POST,

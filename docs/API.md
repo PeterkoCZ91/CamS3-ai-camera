@@ -759,6 +759,33 @@ Basic Auth is applied via `ElegantOTA.setAuth()` **only if both** `http_user` an
 
 CSRF is not applied to these routes (they are the library's own handlers).
 
+The update session does not reboot by itself: ElegantOTA requests the restart and
+the main loop performs it two seconds later (`ElegantOTA.loop()`).
+
+### 5.10a Core dump
+
+A panic writes an ELF core dump to the `coredump` flash partition. These routes
+read it without a USB cable.
+
+| Method | Path | Auth | CSRF | Purpose |
+| --- | --- | --- | --- | --- |
+| GET | `/api/coredump/summary` | yes | — | Crashing task, PC, backtrace, exception cause |
+| GET | `/api/coredump` | yes | — | Raw dump (`application/octet-stream`) |
+| POST | `/api/coredump/erase` | yes | yes | Erase the stored dump |
+
+Both GETs return `404 {"present":false}` when no dump is stored. The summary:
+
+```json
+{"present":true,"size":39268,"task":"motion","pc":"0x42012345","exc_cause":0,
+ "exc_vaddr":"0x00000000","bt_corrupted":false,
+ "backtrace":["0x42012345","0x42056789"],"app_elf_sha256":"a1b2c3d4..."}
+```
+
+`app_elf_sha256` is the ELF hash of the build that crashed; decode with that
+build's `firmware.elf` (`xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <pc> ...`),
+not the one currently running. The raw dump goes to `esp-coredump info_corefile -t raw`.
+A dump stays until erased or overwritten by the next panic.
+
 On success the firmware computes the **SHA-256 of the newly flashed partition** and
 writes it to the log (`logNewFirmwareSha()`), so you can compare it against your
 build output. `/api/status` reports the SHA-256 of the *running* partition as

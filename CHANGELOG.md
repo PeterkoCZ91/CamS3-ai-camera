@@ -12,6 +12,7 @@ All notable changes to this firmware. Versions follow semantic versioning, where
   MQTT and Telegram credentials have to be entered again.
 
 ### Added
+- **Core dump over HTTP**: `GET /api/coredump/summary` (task, PC, backtrace, ELF hash), `GET /api/coredump` (raw) and `POST /api/coredump/erase`, so a camera that panics in place can be diagnosed without USB.
 - Opt-in `auto_profile` setting: a NIGHT exposure overlay driven by mean frame brightness (no light sensor on this board), applied from the capture task with hysteresis and a 60 s dwell.
 
 - **`GET /api/focus`** (alias `/focus`): on-demand focus score (Laplacian variance of the centre crop) for focusing a manual lens by number, with a running `peak` and `?reset=1`. Costs nothing until requested, then samples every ~500 ms for 10 s after the last call.
@@ -39,6 +40,7 @@ All notable changes to this firmware. Versions follow semantic versioning, where
   AP mode can join the network without a phone.
 
 ### Fixed
+- OTA updates now reboot into the new image: `ElegantOTA.loop()` was never called (a comment said otherwise), so a successful upload only took effect after the next power cycle or crash.
 
 - **Permanent boot loop once the event log passed 100 lines.** Rotating
   `/events.jsonl` copied the whole ring (5.6 kB) onto the stack of whichever task
