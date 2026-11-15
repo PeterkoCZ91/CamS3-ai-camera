@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Admin - CamS3</title>
+    <title data-i18n="title.admin">Admin - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
     <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
@@ -82,6 +82,32 @@
             </div>
         </details>
 
+        <!-- Last crash (core dump) -->
+        <details id="crash-card">
+            <summary><span class="sec-color" style="background:var(--red)"></span> <span data-i18n="admin.crash">Last crash</span></summary>
+            <div class="sec-body">
+                <div id="crash-info" style="font-size:.85em;color:var(--text-dim);overflow-wrap:anywhere"></div>
+                <div id="crash-actions" style="display:none;gap:10px;margin-top:12px;flex-wrap:wrap">
+                    <a href="/api/coredump" class="btn btn-outline" download="coredump.elf" data-i18n="admin.crash.download">Download dump</a>
+                    <button type="button" class="btn btn-danger" onclick="confirmEraseCrash()" data-i18n="admin.crash.erase">Erase dump</button>
+                </div>
+            </div>
+        </details>
+
+        <!-- Stored credentials -->
+        <details>
+            <summary><span class="sec-color" style="background:var(--yellow)"></span> <span data-i18n="admin.secrets">Saved credentials</span></summary>
+            <div class="sec-body">
+                <p style="font-size:.8em;color:var(--text-muted);margin-bottom:12px" data-i18n="admin.secrets.hint">
+                    An empty field in Settings keeps the stored value. Use these buttons to actually erase it.
+                </p>
+                <div style="display:flex;flex-direction:column;gap:10px">
+                    <button type="button" class="btn btn-outline btn-block" onclick="confirmClearSecrets('telegram')" data-i18n="admin.secrets.telegram">Clear Telegram token and chat ID</button>
+                    <button type="button" class="btn btn-outline btn-block" onclick="confirmClearSecrets('mqtt')" data-i18n="admin.secrets.mqtt">Clear MQTT username and password</button>
+                </div>
+            </div>
+        </details>
+
         <!-- Actions -->
         <details>
             <summary><span class="sec-color" style="background:var(--red)"></span> <span data-i18n="admin.actions">System actions</span></summary>
@@ -143,7 +169,7 @@
     <script>
     // T() and showToast() come from common.js.
     function loadInfo() {
-        fetch('/api/status').then(r => {
+        apiFetch('/api/status').then(r => {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
         }).then(d => {
@@ -175,8 +201,13 @@
     // either an unhandled rejection or a success toast for something that never ran.
     function postAction(url, okText) {
         return apiFetch(url, {method:'POST'})
-            .then(r => r.json().catch(() => ({success: r.ok})))
+            .then(r => r.json().catch(() => ({})).then(d => {
+                if (d.success === undefined) d.success = r.ok;
+                if (r.status === 401) d.__skip = true;   // apiFetch already toasted 401
+                return d;
+            }))
             .then(d => {
+                if (d.__skip) return;
                 const ok = d.success !== false;
                 showToast(d.message || okText, ok ? 'success' : 'error');
             })
@@ -222,10 +253,66 @@
         });
     }
 
+
+    function loadCrash() {
+        const info = document.getElementById('crash-info');
+        const actions = document.getElementById('crash-actions');
+        const line = (label, value) => {
+            const d = document.createElement('div');
+            const b = document.createElement('strong');
+            b.textContent = T(label) + ': ';
+            d.appendChild(b);
+            d.appendChild(document.createTextNode(String(value)));
+            info.appendChild(d);
+        };
+        apiFetch('/api/coredump/summary').then(r => {
+            if (r.status === 404) return { present: false };
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(d => {
+            info.textContent = '';
+            if (!d.present) {
+                info.textContent = T('admin.crash.none');
+                actions.style.display = 'none';
+                return;
+            }
+            actions.style.display = 'flex';
+            line('admin.crash.size', (d.size || 0) + ' B');
+            if (d.summary_error) {
+                const w = document.createElement('div');
+                w.textContent = T('admin.crash.unreadable');
+                info.appendChild(w);
+                return;
+            }
+            line('admin.crash.task', d.task);
+            line('admin.crash.pc', d.pc);
+            line('admin.crash.cause', d.exc_cause);
+            line('admin.crash.vaddr', d.exc_vaddr);
+            line('admin.crash.bt', (d.backtrace || []).join(' ') + (d.bt_corrupted ? ' ' + T('admin.crash.bt_corrupted') : ''));
+            line('admin.crash.sha', d.app_elf_sha256);
+        }).catch(err => {
+            info.textContent = T('common.error') + ': ' + err.message;
+            actions.style.display = 'none';
+        });
+    }
+
+    function confirmEraseCrash() {
+        showConfirm(T('admin.confirm.crash.title'), T('admin.confirm.crash.text'), function() {
+            postAction('/api/coredump/erase', T('admin.crash.erased')).then(loadCrash);
+        });
+    }
+
+    function confirmClearSecrets(target) {
+        showConfirm(T('admin.confirm.secrets.title'), T('admin.confirm.secrets.' + target + '.text'), function() {
+            postAction('/api/secrets/clear?target=' + encodeURIComponent(target), T('admin.secrets.cleared'));
+        });
+    }
+
     // Wait for DOMContentLoaded: i18n.js is deferred, so calling loadInfo()
     // during parse rendered raw i18n keys instead of translations.
     document.addEventListener('DOMContentLoaded', () => {
         loadInfo();
+        loadCrash();
         setInterval(() => { if (document.visibilityState === 'visible') loadInfo(); }, 5000);
 
         const ov = document.getElementById('confirm-overlay');
@@ -248,7 +335,7 @@
             items[next].focus();
         });
     });
-    window.addEventListener('i18n:change', loadInfo);
+    window.addEventListener('i18n:change', () => { loadInfo(); loadCrash(); });
     </script>
 </body>
 </html>

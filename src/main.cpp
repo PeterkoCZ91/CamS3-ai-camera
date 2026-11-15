@@ -67,6 +67,11 @@ static int consecutiveCaptureFails = 0;
 // If it keeps refusing there is nothing left to try in-process — reboot.
 static int failedReinits = 0;
 static const int MAX_FAILED_REINITS = 3;
+// Boot-time camera init failed: healthWatchdog retries a few times, then reboots.
+static bool cameraBootOk = true;
+static int  bootCameraRetries = 0;
+static const int MAX_BOOT_CAMERA_RETRIES = 3;
+static const unsigned long BOOT_CAMERA_RETRY_MS = 10000;
 
 // LED status indication
 #ifdef INCLUDE_LED_CONTROL
@@ -180,7 +185,52 @@ static void attemptCameraRecovery(const char* reason) {
     }
 }
 
+// Log stack high-water marks (minimum free stack ever, in bytes) of named tasks.
+static void logStackWatermarks() {
+    static const char* const names[] = {
+        "capture", "focus", "motion", "persondet", "facedet",
+        "timelapse", "telegram", "mqtt", "async_tcp", "loopTask"
+    };
+    char line[256];
+    size_t n = 0;
+    line[0] = '\0';
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        TaskHandle_t h = xTaskGetHandle(names[i]);
+        if (!h) continue;
+        int w = snprintf(line + n, sizeof(line) - n, " %s=%u", names[i],
+                         (unsigned)uxTaskGetStackHighWaterMark(h));
+        if (w < 0 || (size_t)w >= sizeof(line) - n) break;
+        n += (size_t)w;
+    }
+    logCapture("[%s] Stack free min (B):%s\n", TAG, line);
+}
+
 static void healthWatchdog() {
+    // Boot-time camera failure: nothing else recovers it (WiFi/web keep running).
+    if (!cameraBootOk) {
+        static unsigned long lastBootRetry = 0;
+        if (millis() - lastBootRetry < BOOT_CAMERA_RETRY_MS) return;
+        lastBootRetry = millis();
+        bootCameraRetries++;
+        logCapture("[%s] Camera still down after boot (retry %d/%d)\n",
+                   TAG, bootCameraRetries, MAX_BOOT_CAMERA_RETRIES);
+        if (cameraInit()) {
+            // Detection tasks were skipped at boot; a clean restart brings up everything.
+            logCapture("[%s] Camera recovered — rebooting to start all tasks\n", TAG);
+            delay(200);
+            ESP.restart();
+        }
+        if (bootCameraRetries >= MAX_BOOT_CAMERA_RETRIES) {
+            #ifdef INCLUDE_EVENT_LOG
+            logEvent(EVT_UNKNOWN, "camera init failed at boot, rebooting");
+            #endif
+            logCapture("[%s] Camera never came up — rebooting\n", TAG);
+            delay(200);
+            ESP.restart();
+        }
+        return;
+    }
+
     // Handle out-of-band reinit request from capture task (repeated fb_get failures)
     if (cameraReinitRequested()) {
         cameraClearReinitRequest();
@@ -239,6 +289,15 @@ static void healthWatchdog() {
                getCaptureErrors(),
                (unsigned long)getRingDroppedFrames(),
                (unsigned long)getOversizeDroppedFrames());
+
+    // Stack watermarks, low frequency (every ~10 min).
+    {
+        static unsigned long lastStackLog = 0;
+        if (lastStackLog == 0 || millis() - lastStackLog > 600000UL) {
+            lastStackLog = millis();
+            logStackWatermarks();
+        }
+    }
 
     // Detection pipeline counters — the numbers you need when tuning thresholds.
     #if defined(INCLUDE_MOTION_DETECT) || defined(INCLUDE_PERSON_DETECT)
@@ -352,10 +411,13 @@ void setup() {
     #ifdef INCLUDE_SD_CARD
     sdInit();
     #endif
+    esp_task_wdt_reset();
 
     // Initialize camera
     // Capture/motion tasks must not start on a failed init (ring slot may be NULL).
     bool cameraOk = cameraInit();
+    esp_task_wdt_reset();
+    cameraBootOk = cameraOk;
     if (!cameraOk) {
         logCapture("[%s] CRITICAL: Camera init failed!\n", TAG);
         #ifdef INCLUDE_LED_CONTROL
@@ -366,9 +428,12 @@ void setup() {
 
     // Initialize WiFi
     wifiInit();
+    esp_task_wdt_reset();
 
     // Start capture task
-    if (cameraOk) startCaptureTask();
+    if (cameraOk && !startCaptureTask()) {
+        logCapture("[%s] Capture task failed to start\n", TAG);
+    }
 
     // Start servers
     streamServerInit();
@@ -434,7 +499,7 @@ void setup() {
     // Start timelapse task
     #if defined(INCLUDE_TIMELAPSE) && !defined(LITE_MODE)
     timelapseInit();
-    xTaskCreatePinnedToCore(timelapseTask, "timelapse", 4096, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(timelapseTask, "timelapse", 6144, NULL, 2, NULL, 0);
     logCapture("[%s] Timelapse task created\n", TAG);
     #endif
 
@@ -456,7 +521,9 @@ void setup() {
     #endif
 
     // Give tasks a chance to run their first iteration
+    esp_task_wdt_reset();
     delay(2000);
+    esp_task_wdt_reset();
 
     #ifdef INCLUDE_LED_CONTROL
     ledSet(true);  // Solid LED = running

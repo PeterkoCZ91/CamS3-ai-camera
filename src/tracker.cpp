@@ -70,9 +70,17 @@ int trackerUpdate(const Detection* detections, int numDetections) {
     int matchDist   = appConfig.tracker.match_dist   > 0 ? appConfig.tracker.match_dist   : TRACKER_MATCH_DIST_DEFAULT;
     int confirmHits = appConfig.tracker.confirm_hits > 0 ? appConfig.tracker.confirm_hits : TRACKER_CONFIRM_HITS_DEFAULT;
     int maxMisses   = appConfig.tracker.max_misses   > 0 ? appConfig.tracker.max_misses   : TRACKER_MAX_MISSES_DEFAULT;
+    // Clamp where consumed: dx*dx+dy*dy overflows int above ~46340, and a
+    // config value is not guaranteed to have gone through the web validator.
+    if (matchDist < 1) matchDist = 1;
+    if (matchDist > 500) matchDist = 500;
+    if (confirmHits < 1) confirmHits = 1;
+    if (maxMisses < 1) maxMisses = 1;
     // Scale only when opted in; the guard keeps the default path integer-exact.
     float ls = lensScale();
     if (ls != 1.0f) matchDist = (int)(matchDist * ls + 0.5f);
+    if (matchDist < 1) matchDist = 1;
+    if (matchDist > 1000) matchDist = 1000;
     int maxDistSq = matchDist * matchDist;
 
     // --- Greedy nearest-neighbor matching ---
@@ -142,6 +150,10 @@ int trackerUpdate(const Detection* detections, int numDetections) {
             tr.state = TRACK_DELETED;
         }
     }
+
+    // --- Free slots of tracks deleted above before creating new ones, so a
+    // full table does not block a new track for one extra frame. ---
+    compactTracks();
 
     // --- Create new tracks for unmatched detections ---
     for (int d = 0; d < numDetections; d++) {

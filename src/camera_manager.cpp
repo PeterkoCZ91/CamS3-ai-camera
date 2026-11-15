@@ -84,7 +84,6 @@ static uint32_t fpsFrameCount = 0;
 // Stream client tracking
 static volatile int streamClients = 0;
 static volatile int detectionStreamClients = 0;
-static SemaphoreHandle_t clientMutex = NULL;
 
 // Capture task handle
 static TaskHandle_t captureTaskHandle = NULL;
@@ -228,9 +227,8 @@ bool cameraSensorViewOneShotPending() { return sensorOneShotPending; }
 // Created at the top of cameraInit(), before anything can fail, so a failed camera
 // init cannot leave NULL mutexes for the first stream client to take.
 static bool ensureMutexes() {
-    if (!clientMutex) clientMutex = xSemaphoreCreateMutex();
     if (!decodeMutex) decodeMutex = xSemaphoreCreateMutex();
-    if (!clientMutex || !decodeMutex) {
+    if (!decodeMutex) {
         logCapture("[%s] Failed to create mutexes\n", TAG);
         return false;
     }
@@ -267,7 +265,7 @@ static bool initRingBuffer() {
 }
 
 bool cameraInit() {
-    ensureMutexes();  // best effort; users NULL-guard (see clientLock)
+    ensureMutexes();  // best effort; cameraDecodeLock() NULL-guards
     camera_config_t config;
     memset(&config, 0, sizeof(config));
 
@@ -372,8 +370,11 @@ bool cameraReinit() {
 
     bool ok = cameraInit();
     if (ok && captureWantedAfterReinit) {
-        startCaptureTask();
-        if (captureRunning) captureWantedAfterReinit = false;  // cleared only once really restarted
+        if (startCaptureTask()) {
+            captureWantedAfterReinit = false;  // cleared only once really restarted
+        } else {
+            ok = false;  // camera is up but nothing captures: report failure so the watchdog retries
+        }
     }
     return ok;
 }
@@ -400,6 +401,7 @@ static void captureTask(void* param) {
     fpsCountStart = millis();
     fpsFrameCount = 0;
     esp_task_wdt_add(NULL);
+    int consecutiveFails = 0;   // local: the cumulative captureErrors must not drive reinits
 
     while (captureRunning) {
         esp_task_wdt_reset();
@@ -420,12 +422,14 @@ static void captureTask(void* param) {
             vTaskDelay(pdMS_TO_TICKS(100));
 
             // Ask main loop to reinit (it will stop this task first)
-            if (captureErrors > 0 && (captureErrors % 10) == 0) {
+            consecutiveFails++;
+            if ((consecutiveFails % 10) == 0) {
                 logCapture("[%s] Too many errors, requesting reinit\n", TAG);
                 reinitRequested = true;
             }
             continue;
         }
+        consecutiveFails = 0;
 
         // Publish the frame into the ring buffer. Lock-free: the writer claims a
         // slot with a CAS 0 -> -1 and copies into it without holding any mutex.
@@ -525,8 +529,15 @@ static void captureTask(void* param) {
     vTaskDelete(NULL);
 }
 
-void startCaptureTask() {
-    if (captureRunning) return;
+bool startCaptureTask() {
+    if (captureRunning) return true;
+    // A previous stopCaptureTask() may have timed out: the old task still exists
+    // (handle kept, exit flag not set). Creating a second one would double-drive
+    // the driver, so refuse.
+    if (captureTaskHandle && !captureTaskExited) {
+        logCapture("[%s] Old capture task still alive, not starting another\n", TAG);
+        return false;
+    }
     captureRunning = true;
     captureTaskExited = false;
     if (xTaskCreatePinnedToCore(captureTask, "capture", CAPTURE_TASK_STACK,
@@ -535,7 +546,9 @@ void startCaptureTask() {
         captureTaskExited = true;
         captureTaskHandle = NULL;
         logCapture("[%s] Failed to create capture task\n", TAG);
+        return false;
     }
+    return true;
 }
 
 // Returns true once the capture task has really left its loop and deleted itself.
@@ -608,42 +621,33 @@ void cameraDecodeUnlock() {
     if (decodeMutex) xSemaphoreGive(decodeMutex);
 }
 
-// NULL-safe: if the mutex was never created, count unlocked rather than assert.
-static bool clientLock() {
-    return !clientMutex || xSemaphoreTake(clientMutex, pdMS_TO_TICKS(100)) == pdTRUE;
+// Client counters are plain atomics (no mutex, no logging under a lock).
+static void counterInc(volatile int* c) { __atomic_add_fetch(c, 1, __ATOMIC_SEQ_CST); }
+static void counterDec(volatile int* c) {
+    int cur = __atomic_load_n(c, __ATOMIC_SEQ_CST);
+    while (cur > 0 &&
+           !__atomic_compare_exchange_n(c, &cur, cur - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    }
 }
-static void clientUnlock() { if (clientMutex) xSemaphoreGive(clientMutex); }
 
 void streamClientConnected() {
-    if (clientLock()) {
-        streamClients++;
-        logCapture("[%s] Stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        clientUnlock();
-    }
+    counterInc(&streamClients);
+    logCapture("[%s] Stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
 }
 
 void streamClientDisconnected() {
-    if (clientLock()) {
-        if (streamClients > 0) streamClients--;
-        logCapture("[%s] Stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        clientUnlock();
-    }
+    counterDec(&streamClients);
+    logCapture("[%s] Stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
 }
 
 void detectionStreamClientConnected() {
-    if (clientLock()) {
-        detectionStreamClients++;
-        logCapture("[%s] Detection stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        clientUnlock();
-    }
+    counterInc(&detectionStreamClients);
+    logCapture("[%s] Detection stream client connected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
 }
 
 void detectionStreamClientDisconnected() {
-    if (clientLock()) {
-        if (detectionStreamClients > 0) detectionStreamClients--;
-        logCapture("[%s] Detection stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
-        clientUnlock();
-    }
+    counterDec(&detectionStreamClients);
+    logCapture("[%s] Detection stream client disconnected (gui: %d, detection: %d)\n", TAG, streamClients, detectionStreamClients);
 }
 
 int getStreamClientCount()  { return streamClients; }

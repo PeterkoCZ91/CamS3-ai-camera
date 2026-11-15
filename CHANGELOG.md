@@ -11,6 +11,16 @@ All notable changes to this firmware. Versions follow semantic versioning, where
   (`ENC2`). Older firmware cannot read them: after a downgrade WiFi, the HTTP password,
   MQTT and Telegram credentials have to be entered again.
 
+### Fixed (code review 2026-11)
+- **Motion events swallowed** when movement restarted inside `cooldown_sec` after the previous event (dead `cooldownExpired` branch); person detection now keeps inferring for 8 s after a motion trigger so the tracker can reach `confirm_hits` inside one event.
+- **Telegram offline queue** no longer deletes queued photos while the network is simply down; every TLS/HTTP client has handshake/connect timeouts and feeds the task watchdog.
+- **Boot loops from stored values**: out-of-range `poll_interval`, zone rectangles, tracker and timelapse parameters are clamped on load and on `POST /api/settings` (`sanitizeConfig()`); zone loops are bounded.
+- **Use-after-free** in stream/snapshot `X-Framerate`/`X-Timestamp` headers; stream handler and SD writers no longer hold ring slots across slow I/O.
+- Camera reinit now triggers on 10 *consecutive* capture errors; a camera that fails at boot is retried and finally rebooted; capture/focus/timelapse stacks raised to 6 KB with periodic high-water-mark logging.
+- Atomic writes for zones, ROI mask, lens profiles, event log and stats; mutexes around zones and the event log; event details are JSON-escaped.
+- CORS `*` removed; `/log`, `/api/events`, `/api/wifi/scan` require auth; empty auth credentials fail closed.
+- UI: coredump card, "clear saved credentials", 401 handling, translated titles and toasts.
+
 ### Added
 - **Core dump over HTTP**: `GET /api/coredump/summary` (task, PC, backtrace, ELF hash), `GET /api/coredump` (raw) and `POST /api/coredump/erase`, so a camera that panics in place can be diagnosed without USB.
 - Opt-in `auto_profile` setting: a NIGHT exposure overlay driven by mean frame brightness (no light sensor on this board), applied from the capture task with hysteresis and a 60 s dwell.

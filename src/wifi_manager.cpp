@@ -3,6 +3,7 @@
 #include "config.h"
 #include <WiFi.h>
 #include <DNSServer.h>
+#include <esp_task_wdt.h>
 
 #ifdef INCLUDE_MDNS
 #include <ESPmDNS.h>
@@ -59,8 +60,11 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 // Deferred connect request (set by async handler, consumed by wifiLoop)
 static volatile bool     pendingConnect = false;
-static String            pendingSsid;
-static String            pendingPass;
+// Fixed buffers + spinlock: the writer (async web task) and the reader (loop task)
+// run on different cores, and String assignment is not atomic.
+static char              pendingSsid[33];
+static char              pendingPass[65];
+static portMUX_TYPE      pendingMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool wifiInit() {
     WiFi.setHostname(appConfig.wifi.hostname.c_str());
@@ -77,6 +81,7 @@ bool wifiInit() {
         int attempts = 0;
         while (WiFi.status() != WL_CONNECTED && attempts < 20) {
             delay(500);
+            esp_task_wdt_reset();
             Serial.print(".");
             attempts++;
         }
@@ -91,7 +96,6 @@ bool wifiInit() {
             #ifdef INCLUDE_MDNS
             if (MDNS.begin(appConfig.wifi.hostname.c_str())) {
                 MDNS.addService("http", "tcp", HTTP_PORT);
-                MDNS.addService("rtsp", "tcp", 554);
                 logCapture("[%s] mDNS: %s.local\n", TAG, appConfig.wifi.hostname.c_str());
             }
             #endif
@@ -125,11 +129,18 @@ void wifiLoop() {
 
     // Handle deferred connect request (from async web handler)
     if (pendingConnect) {
-        String ssid = pendingSsid;
-        String pass = pendingPass;
+        char ssidBuf[sizeof(pendingSsid)];
+        char passBuf[sizeof(pendingPass)];
+        portENTER_CRITICAL(&pendingMux);
+        memcpy(ssidBuf, pendingSsid, sizeof(ssidBuf));
+        memcpy(passBuf, pendingPass, sizeof(passBuf));
+        pendingSsid[0] = '\0';
+        pendingPass[0] = '\0';
         pendingConnect = false;
-        pendingSsid = String();
-        pendingPass = String();
+        portEXIT_CRITICAL(&pendingMux);
+        String ssid(ssidBuf);
+        String pass(passBuf);
+        memset(passBuf, 0, sizeof(passBuf));
         wifiConnect(ssid, pass);
     }
 
@@ -151,8 +162,7 @@ void wifiLoop() {
                 #ifdef INCLUDE_MDNS
                 if (MDNS.begin(appConfig.wifi.hostname.c_str())) {
                     MDNS.addService("http", "tcp", HTTP_PORT);
-                    MDNS.addService("rtsp", "tcp", 554);
-                }
+                    }
                 #endif
                 return;
             }
@@ -222,9 +232,20 @@ void wifiLoop() {
 }
 
 void wifiRequestConnect(const String& ssid, const String& password) {
-    pendingSsid = ssid;
-    pendingPass = password;
+    if (ssid.length() >= sizeof(pendingSsid) || password.length() >= sizeof(pendingPass)) {
+        logCapture("[%s] Connect request ignored: SSID/password too long\n", TAG);
+        return;
+    }
+    portENTER_CRITICAL(&pendingMux);
+    if (pendingConnect) {   // a request is already queued: ignore this one, never overwrite
+        portEXIT_CRITICAL(&pendingMux);
+        logCapture("[%s] Connect request ignored: another one is pending\n", TAG);
+        return;
+    }
+    strlcpy(pendingSsid, ssid.c_str(), sizeof(pendingSsid));
+    strlcpy(pendingPass, password.c_str(), sizeof(pendingPass));
     pendingConnect = true;
+    portEXIT_CRITICAL(&pendingMux);
 }
 
 AppWiFiMode getWiFiCurrentMode() { return currentMode; }
@@ -286,6 +307,7 @@ bool wifiConnect(const String& ssid, const String& password) {
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
+        esp_task_wdt_reset();
         attempts++;
     }
 

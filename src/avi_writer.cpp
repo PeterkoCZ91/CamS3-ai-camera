@@ -61,7 +61,7 @@ bool AviWriter::begin(File& file, uint16_t width, uint16_t height, uint8_t fps) 
     put32(hdr + p, usPerFrame); p += 4;
     put32(hdr + p, 0);      p += 4;  // dwMaxBytesPerSec
     put32(hdr + p, 0);      p += 4;  // dwPaddingGranularity
-    put32(hdr + p, 0x10);   p += 4;  // dwFlags: AVIF_HASINDEX
+    put32(hdr + p, 0);      p += 4;  // dwFlags: no AVIF_HASINDEX (idx1 is not written)
     put32(hdr + p, 0);      p += 4;  // dwTotalFrames — patched in end()
     put32(hdr + p, 0);      p += 4;  // dwInitialFrames
     put32(hdr + p, 1);      p += 4;  // dwStreams
@@ -130,44 +130,58 @@ bool AviWriter::writeVideoFrame(const uint8_t* jpegData, size_t jpegLen) {
 
 bool AviWriter::writeChunk(const char fourcc[4], const uint8_t* data, size_t len) {
     if (!_file) return false;
+    // RIFF sizes are 32-bit: refuse a chunk that would push the file past 2 GB
+    // (also keeps position() arithmetic in end() safe).
+    const uint64_t AVI_MAX_BYTES = 0x7FFFFFFFULL;
+    uint64_t chunkBytes = 8ULL + len + (len & 1);
+    if ((uint64_t)_totalDataBytes + 224ULL + chunkBytes > AVI_MAX_BYTES) {
+        logCapture("[AVI] 2 GB limit reached, frame refused\n");
+        return false;
+    }
     uint8_t chunkHdr[8];
     memcpy(chunkHdr, fourcc, 4);
     put32(chunkHdr + 4, (uint32_t)len);
     if (_file->write(chunkHdr, 8) != 8) return false;
     if (len > 0 && _file->write(data, len) != len) return false;
     _totalDataBytes += 8 + len;
-    if (len & 1) { writePadByte(len); _totalDataBytes++; }
+    if (len & 1) {
+        if (!writePadByte(len)) return false;
+        _totalDataBytes++;
+    }
     return true;
 }
 
-void AviWriter::writePadByte(size_t len) {
-    if (len & 1) { uint8_t zero = 0; _file->write(&zero, 1); }
+bool AviWriter::writePadByte(size_t len) {
+    if (len & 1) { uint8_t zero = 0; return _file->write(&zero, 1) == 1; }
+    return true;
 }
 
 bool AviWriter::end() {
     if (!_file) return false;
     uint8_t buf[4];
 
+    bool ok = true;
     uint32_t riffSizeVal = (uint32_t)(_file->position() - 8);
-    _file->seek(4);
-    put32(buf, riffSizeVal); _file->write(buf, 4);
+    ok &= _file->seek(4);
+    put32(buf, riffSizeVal); ok &= (_file->write(buf, 4) == 4);
 
     // avih.dwTotalFrames at offset 48
-    _file->seek(48);
-    put32(buf, _videoFrames); _file->write(buf, 4);
+    ok &= _file->seek(48);
+    put32(buf, _videoFrames); ok &= (_file->write(buf, 4) == 4);
 
     // video strh.dwLength at offset 140
-    _file->seek(140);
-    put32(buf, _videoFrames); _file->write(buf, 4);
+    ok &= _file->seek(140);
+    put32(buf, _videoFrames); ok &= (_file->write(buf, 4) == 4);
 
     // movi LIST size
     uint32_t moviSize = 4 + _totalDataBytes;
-    _file->seek(_moviStart);
-    put32(buf, moviSize); _file->write(buf, 4);
+    ok &= _file->seek(_moviStart);
+    put32(buf, moviSize); ok &= (_file->write(buf, 4) == 4);
 
     _file->flush();
     _file = nullptr;
-    return true;
+    if (!ok) logCapture("[AVI] Header patch failed\n");
+    return ok;
 }
 
 #endif // INCLUDE_AVI_WRITER

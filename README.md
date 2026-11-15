@@ -408,7 +408,7 @@ Set the bot token and chat ID on the settings page. Only **one** chat is
 authorized — updates from any other `chat_id` are dropped and logged. Sends are
 queued and non-blocking, and photos that fail can spill to SD to be retried.
 Polling is a short poll (`getUpdates?timeout=0&limit=5`) driven by the send
-queue's timeout, every `poll_interval_ms` (default 30 s).
+queue's timeout, every `poll_interval_ms` (default 15 s, range 1-15 s).
 
 | Command | Effect |
 |---|---|
@@ -628,15 +628,15 @@ or MQTT. There is no cloud service, no telemetry and no phone-home.
   "Connecting…" after a successful login. The broadcast carries only non-secret
   status and the socket accepts no commands, but anyone on the LAN can read it.
 - **`/api/status`, `/status`, `/telemetry`, `/health`, `/a12/status`,
-  `/api/sensor` (read-only register view), `/api/snapshot`, `/api/events`, `/log`,
-  `/stream-stats` and `/psram-stats` are public** — that includes a JPEG frame and the log ring buffer.
+  `/api/sensor` (read-only register view), `/api/snapshot`, `/stream-stats` and
+  `/psram-stats` are public** — that includes a JPEG frame. `/log`, `/api/events` and
+  `/api/wifi/scan` require Basic Auth.
 - **Telegram TLS uses `setInsecure()`** on all four HTTPS paths: no certificate
   validation, so the connection to `api.telegram.org` is not protected against an
   active man-in-the-middle. MQTT TLS verifies *if* you upload a `/ca.pem`;
   otherwise it falls back to `setInsecure()` too.
 - **Basic Auth over plain HTTP** — base64, not encryption. Empty credentials
-  disable auth entirely, and `Access-Control-Allow-Origin: *` is set on every
-  response.
+  disable auth entirely. Port 80 sends no CORS headers (port 81 does).
 - **Defaults are weak by design**: `admin` / `admin`, and
   `CamS3-Setup` / `cams3admin` for the setup AP. The firmware warns rather than
   auto-generating, because a user without a UART cable would be locked out.

@@ -13,10 +13,12 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <stdlib.h>
 
 #ifdef INCLUDE_SD_CARD
 #include <SD.h>
 #include <FS.h>
+#include "sd_store.h"
 #define TG_PENDING_DIR       "/telegram_pending"
 #define TG_PENDING_MAX       50     // cap so we don't fill the card
 #define TG_PENDING_MAGIC     0x54475057UL  // "TGPW"
@@ -47,6 +49,20 @@ struct TelegramMessage {
 static QueueHandle_t tgQueue = NULL;
 static int64_t lastUpdateId = 0;
 static unsigned long lastTgSendTime = 0;
+static bool lastTgSendValid = false;   // false until the first send: no cooldown right after boot
+static void markTgSent() { lastTgSendTime = millis(); lastTgSendValid = true; }
+
+// Timeouts for every TLS/HTTP client. arduino-esp32 2.x: handshake timeout is in ms,
+// WiFiClient::setTimeout in seconds, HTTPClient timeouts in ms.
+static void tgPrepClient(WiFiClientSecure& c) {
+    c.setInsecure();
+    c.setHandshakeTimeout(8000);
+    c.setTimeout(10);
+}
+static void tgPrepHttp(HTTPClient& h, uint16_t ms = 10000) {
+    h.setConnectTimeout(8000);
+    h.setTimeout(ms);
+}
 
 // Silent mode — when non-zero, notifications are suppressed until this
 // millis() timestamp, after which an auto-resume message is sent.
@@ -101,10 +117,11 @@ static void sendBootMessage();
 // Spill a photo to SD with a small header so one file carries the full
 // caption+payload. Used when the in-RAM queue is full or the send fails.
 static bool persistPhotoToSd(const uint8_t* jpeg, size_t jpegLen, const char* caption) {
-    if (SD.cardType() == CARD_NONE) return false;
+    if (!sdStoreAvailable()) return false;   // card missing or breaker tripped
     if (!SD.exists(TG_PENDING_DIR)) SD.mkdir(TG_PENDING_DIR);
 
     // Rotate: if we already have too many, drop the oldest.
+    esp_task_wdt_reset();
     {
         File dir = SD.open(TG_PENDING_DIR);
         if (dir) {
@@ -130,6 +147,11 @@ static bool persistPhotoToSd(const uint8_t* jpeg, size_t jpegLen, const char* ca
 
     char path[96];
     snprintf(path, sizeof(path), "%s/%lu.tgp", TG_PENDING_DIR, (unsigned long)millis());
+    // millis() repeats after a reboot and FILE_WRITE truncates — pick an unused name.
+    for (int tries = 0; SD.exists(path) && tries < 20; tries++) {
+        snprintf(path, sizeof(path), "%s/%lu_%04x.tgp", TG_PENDING_DIR,
+                 (unsigned long)millis(), (unsigned)(esp_random() & 0xFFFF));
+    }
     File out = SD.open(path, FILE_WRITE);
     if (!out) return false;
 
@@ -153,8 +175,12 @@ static bool persistPhotoToSd(const uint8_t* jpeg, size_t jpegLen, const char* ca
 // Pop the oldest pending file and try to send it. Returns true if one
 // was processed (sent OR unrecoverable + deleted); caller can call again
 // to drain multiple per cycle.
+static unsigned long flushBackoffUntil = 0;   // millis(); 0 = no backoff
+static unsigned long flushBackoffMs    = 0;
+
 static bool flushOnePendingFromSd() {
     if (SD.cardType() == CARD_NONE) return false;
+    if (flushBackoffUntil && (long)(millis() - flushBackoffUntil) < 0) return false;
     if (!SD.exists(TG_PENDING_DIR)) return false;
 
     // Find oldest by mtime.
@@ -191,16 +217,35 @@ static bool flushOnePendingFromSd() {
         return true;
     }
 
+    if (hdr.jpeg_len == 0) {
+        in.close();
+        SD.remove(path);
+        logCapture("[%s] Dropped empty pending %s\n", TAG, oldest.c_str());
+        return true;
+    }
+
     char caption[513] = {};
     if (hdr.caption_len) {
-        in.read((uint8_t*)caption, hdr.caption_len);
+        if (in.read((uint8_t*)caption, hdr.caption_len) != (int)hdr.caption_len) {
+            in.close();
+            SD.remove(path);
+            logCapture("[%s] Dropped truncated pending %s (caption)\n", TAG, oldest.c_str());
+            return true;
+        }
         caption[hdr.caption_len] = 0;
     }
 
     uint8_t* jpeg = (uint8_t*)ps_malloc(hdr.jpeg_len);
     if (!jpeg) { in.close(); return false; }  // try again next cycle when heap eases
-    in.read(jpeg, hdr.jpeg_len);
+    if (in.read(jpeg, hdr.jpeg_len) != (int)hdr.jpeg_len) {
+        free(jpeg);
+        in.close();
+        SD.remove(path);
+        logCapture("[%s] Dropped truncated pending %s (jpeg)\n", TAG, oldest.c_str());
+        return true;
+    }
     in.close();
+    esp_task_wdt_reset();
 
     bool sent = sendPhotoSync(jpeg, hdr.jpeg_len, caption);
     free(jpeg);
@@ -211,7 +256,9 @@ static bool flushOnePendingFromSd() {
     if (sent) {
         SD.remove(path);
         failCount = 0;
-        lastTgSendTime = millis();
+        flushBackoffUntil = 0;
+        flushBackoffMs = 0;
+        markTgSent();
         logCapture("[%s] Flushed pending %s (%u bytes)\n", TAG, oldest.c_str(), (unsigned)hdr.jpeg_len);
     } else if (isPermanentHttpError(lastPhotoHttpStatus)) {
         // 4xx will never succeed (bad caption/JPEG) — dead-letter it so the queue moves on.
@@ -219,7 +266,18 @@ static bool flushOnePendingFromSd() {
         failCount = 0;
         logCapture("[%s] Dropped pending %s: HTTP %d (permanent)\n", TAG, oldest.c_str(), lastPhotoHttpStatus);
         return true;
+    } else if (lastPhotoHttpStatus == 0) {
+        // No server answer (network down / timeout): keep the file and back off.
+        // This must not count towards the 5-strike drop below, or a short outage
+        // would delete the whole offline queue.
+        flushBackoffMs = flushBackoffMs ? flushBackoffMs * 2 : 15000;
+        if (flushBackoffMs > 300000) flushBackoffMs = 300000;
+        flushBackoffUntil = millis() + flushBackoffMs;
+        if (flushBackoffUntil == 0) flushBackoffUntil = 1;
+        logCapture("[%s] Flush of %s: no network, retry in %lu s\n", TAG, oldest.c_str(),
+                   flushBackoffMs / 1000);
     } else {
+        // Real server answer that is neither 200 nor a permanent 4xx (429, 5xx).
         if (failPath != path) { failPath = path; failCount = 0; }
         if (++failCount >= 5) {
             SD.remove(path);
@@ -257,16 +315,17 @@ static bool sendTextSync(const char* text) {
 
     String url = "https://api.telegram.org/bot" + appConfig.telegram.bot_token + "/sendMessage";
 
+    esp_task_wdt_reset();
     HTTPClient http;
     WiFiClientSecure client;
-    client.setInsecure();
+    tgPrepClient(client);
 
     if (!http.begin(client, url)) {
         logCapture("[%s] HTTP begin failed\n", TAG);
         return false;
     }
 
-    http.setTimeout(10000);
+    tgPrepHttp(http);
     http.addHeader("Content-Type", "application/json");
 
     JsonDocument doc;
@@ -279,6 +338,7 @@ static bool sendTextSync(const char* text) {
 
     int code = http.POST(body);
     http.end();
+    esp_task_wdt_reset();
 
     if (code == 200) {
         logCapture("[%s] Text sent OK\n", TAG);
@@ -292,13 +352,16 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
     lastPhotoHttpStatus = 0;
     if (!isTelegramConnected() || !isWiFiConnected()) return false;
 
+    esp_task_wdt_reset();
     WiFiClientSecure client;
-    client.setInsecure();
+    tgPrepClient(client);
 
-    if (!client.connect("api.telegram.org", 443)) {
+    if (!client.connect("api.telegram.org", 443, 8000)) {
         logCapture("[%s] TLS connect failed\n", TAG);
         return false;
     }
+    esp_task_wdt_reset();
+    const unsigned long uploadDeadline = millis() + 45000;  // whole upload, not per write
 
     String boundary = "----CamS3Boundary";
     String path = "/bot" + appConfig.telegram.bot_token + "/sendPhoto";
@@ -338,14 +401,15 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
     size_t sent = 0;
     while (sent < jpegLen) {
         size_t chunk = min((size_t)1024, jpegLen - sent);
+        esp_task_wdt_reset();
         size_t written = client.write(jpeg + sent, chunk);
-        if (written == 0) {
+        if (written == 0 || (long)(millis() - uploadDeadline) > 0) {
             logCapture("[%s] Photo write stalled at %u/%u\n", TAG, sent, jpegLen);
             client.stop();
             return false;
         }
         sent += written;
-        vTaskDelay(1);  // yield to WDT
+        vTaskDelay(1);  // yield to the scheduler (the wdt is fed above)
     }
 
     client.print(tail);
@@ -353,7 +417,8 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
 
     // Read response status
     unsigned long timeout = millis() + 15000;
-    while (!client.available() && millis() < timeout) {
+    while (!client.available() && client.connected() && (long)(millis() - timeout) < 0) {
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
@@ -374,6 +439,7 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
     }
 
     client.stop();
+    esp_task_wdt_reset();
     return success;
 }
 
@@ -650,13 +716,15 @@ static void tgAckUpdates(int64_t id) {
     snprintf(url, sizeof(url),
         "https://api.telegram.org/bot%s/getUpdates?offset=%lld&timeout=0&limit=1",
         appConfig.telegram.bot_token.c_str(), (long long)(id + 1));
+    esp_task_wdt_reset();
     HTTPClient http;
     WiFiClientSecure client;
-    client.setInsecure();
+    tgPrepClient(client);
     if (!http.begin(client, url)) return;
-    http.setTimeout(10000);
+    tgPrepHttp(http);
     http.GET();
     http.end();
+    esp_task_wdt_reset();
 }
 
 // discardOnly: boot-time pass — advance lastUpdateId past stale updates, run nothing.
@@ -670,79 +738,101 @@ static int checkTelegramUpdates(bool discardOnly = false) {
         "https://api.telegram.org/bot%s/getUpdates?offset=%lld&timeout=0&limit=5",
         appConfig.telegram.bot_token.c_str(), (long long)(lastUpdateId + 1));
 
-    HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-
-    if (!http.begin(client, url)) return 0;
-    http.setTimeout(10000);
-
-    int code = http.GET();
-    if (code != 200) {
-        http.end();
-        return 0;
-    }
-
-    // Read response stream directly into JSON parser to avoid large String alloc
-    WiFiClient* stream = http.getStreamPtr();
-    JsonDocument doc;
-    if (deserializeJson(doc, *stream)) {
-        http.end();
-        return 0;
-    }
-    http.end();
-
-    if (!doc["ok"].as<bool>()) return 0;
-
-    JsonArray results = doc["result"].as<JsonArray>();
+    // Parse everything into a small fixed array inside this scope; the HTTP client,
+    // TLS context and JSON document are all released BEFORE any command runs, so
+    // handleCommand (which opens its own TLS connections) does not stack on top of them.
+    struct PendingCmd {
+        int64_t id;
+        char cmd[32];
+        char args[128];
+    };
+    PendingCmd cmds[5];
+    int ncmds = 0;
     int seen = 0;
-    for (JsonObject update : results) {
-        seen++;
-        int64_t updateId = update["update_id"].as<int64_t>();
-        if (updateId > lastUpdateId) lastUpdateId = updateId;
-        if (discardOnly) continue;
 
-        JsonObject msg = update["message"];
-        if (!msg) continue;
+    {
+        esp_task_wdt_reset();
+        HTTPClient http;
+        WiFiClientSecure client;
+        tgPrepClient(client);
 
-        // Security: verify chat_id (compare as int64 — no String alloc)
-        int64_t fromChatId = msg["chat"]["id"].as<int64_t>();
-        int64_t ourChatId = atoll(appConfig.telegram.chat_id.c_str());
-        if (fromChatId != ourChatId) {
-            logCapture("[%s] Unauthorized chat_id: %lld\n", TAG, (long long)fromChatId);
-            continue;
+        if (!http.begin(client, url)) return 0;
+        tgPrepHttp(http);
+
+        int code = http.GET();
+        if (code != 200) {
+            http.end();
+            return 0;
         }
 
-        const char* text = msg["text"] | "";
-        if (text[0] == '\0' || text[0] != '/') continue;
-
-        // Parse command: skip '/', extract cmd and args using fixed buffers
-        char cmdBuf[32] = {};
-        char argsBuf[128] = {};
-        const char* p = text + 1;  // skip '/'
-
-        // Find end of command (space or @)
-        int ci = 0;
-        while (*p && *p != ' ' && *p != '@' && ci < (int)sizeof(cmdBuf) - 1) {
-            cmdBuf[ci++] = tolower(*p);
-            p++;
+        // Read response stream directly into JSON parser to avoid large String alloc
+        WiFiClient* stream = http.getStreamPtr();
+        JsonDocument doc;
+        if (deserializeJson(doc, *stream)) {
+            http.end();
+            return 0;
         }
-        // Skip @botname if present
-        if (*p == '@') { while (*p && *p != ' ') p++; }
-        // Skip space, copy args
-        if (*p == ' ') {
-            p++;
-            while (*p == ' ') p++;  // trim leading spaces
-            strncpy(argsBuf, p, sizeof(argsBuf) - 1);
-            // trim trailing spaces
-            int len = strlen(argsBuf);
-            while (len > 0 && argsBuf[len-1] == ' ') argsBuf[--len] = '\0';
-        }
+        http.end();
+        esp_task_wdt_reset();
 
+        if (!doc["ok"].as<bool>()) return 0;
+
+        JsonArray results = doc["result"].as<JsonArray>();
+        for (JsonObject update : results) {
+            seen++;
+            int64_t updateId = update["update_id"].as<int64_t>();
+            if (updateId > lastUpdateId) lastUpdateId = updateId;
+            if (discardOnly) continue;
+            if (ncmds >= 5) continue;
+
+            JsonObject msg = update["message"];
+            if (!msg) continue;
+
+            // Security: verify chat_id (compare as int64 — no String alloc)
+            int64_t fromChatId = msg["chat"]["id"].as<int64_t>();
+            int64_t ourChatId = atoll(appConfig.telegram.chat_id.c_str());
+            if (fromChatId != ourChatId) {
+                logCapture("[%s] Unauthorized chat_id: %lld\n", TAG, (long long)fromChatId);
+                continue;
+            }
+
+            const char* text = msg["text"] | "";
+            if (text[0] == '\0' || text[0] != '/') continue;
+
+            // Parse command: skip '/', extract cmd and args using fixed buffers
+            PendingCmd& pc = cmds[ncmds];
+            pc.id = updateId;
+            memset(pc.cmd, 0, sizeof(pc.cmd));
+            memset(pc.args, 0, sizeof(pc.args));
+            const char* p = text + 1;  // skip '/'
+
+            // Find end of command (space or @)
+            int ci = 0;
+            while (*p && *p != ' ' && *p != '@' && ci < (int)sizeof(pc.cmd) - 1) {
+                pc.cmd[ci++] = tolower(*p);
+                p++;
+            }
+            // Skip @botname if present
+            if (*p == '@') { while (*p && *p != ' ') p++; }
+            // Skip space, copy args
+            if (*p == ' ') {
+                p++;
+                while (*p == ' ') p++;  // trim leading spaces
+                strncpy(pc.args, p, sizeof(pc.args) - 1);
+                // trim trailing spaces
+                int len = strlen(pc.args);
+                while (len > 0 && pc.args[len-1] == ' ') pc.args[--len] = '\0';
+            }
+            ncmds++;
+        }
+    }   // http, client, doc destroyed here
+
+    for (int i = 0; i < ncmds; i++) {
+        esp_task_wdt_reset();
         // Ack before a restart: ESP.restart() never returns, so the offset would be lost.
-        if (!strcmp(cmdBuf, "restart") || !strcmp(cmdBuf, "reboot")) tgAckUpdates(updateId);
+        if (!strcmp(cmds[i].cmd, "restart") || !strcmp(cmds[i].cmd, "reboot")) tgAckUpdates(cmds[i].id);
 
-        handleCommand(String(cmdBuf), String(argsBuf));
+        handleCommand(String(cmds[i].cmd), String(cmds[i].args));
     }
     return seen;
 }
@@ -762,16 +852,16 @@ void telegramInit() {
 // the queue unconditionally, the public API enforces the limit.
 static bool cooldownElapsed() {
     unsigned long cd = (unsigned long)appConfig.telegram.cooldown_sec * 1000UL;
-    if (cd == 0) return true;
+    if (cd == 0 || !lastTgSendValid) return true;
     return (millis() - lastTgSendTime) >= cd;
 }
 
-void telegramSendText(const char* msg) {
-    if (!tgQueue || !msg) return;
+bool telegramSendText(const char* msg) {
+    if (!tgQueue || !msg || !appConfig.telegram.enabled) return false;
 
     if (!cooldownElapsed()) {
         logCapture("[%s] Cooldown active, text dropped\n", TAG);
-        return;
+        return false;
     }
 
     TelegramMessage tgMsg = {};
@@ -782,22 +872,24 @@ void telegramSendText(const char* msg) {
 
     if (xQueueSend(tgQueue, &tgMsg, 0) != pdTRUE) {
         logCapture("[%s] Queue full, text dropped\n", TAG);
+        return false;
     }
+    return true;
 }
 
-void telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption) {
-    if (!tgQueue || !jpeg || len == 0) return;
+bool telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption) {
+    if (!tgQueue || !jpeg || len == 0 || !appConfig.telegram.enabled) return false;
 
     if (!cooldownElapsed()) {
         logCapture("[%s] Cooldown active, photo dropped\n", TAG);
-        return;
+        return false;
     }
 
     // Copy JPEG to PSRAM (freed by task after send)
     uint8_t* copy = (uint8_t*)ps_malloc(len);
     if (!copy) {
         logCapture("[%s] PSRAM alloc failed for photo (%u bytes)\n", TAG, len);
-        return;
+        return false;
     }
     memcpy(copy, jpeg, len);
 
@@ -808,12 +900,14 @@ void telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption) {
     tgMsg.photo_len = len;
 
     if (xQueueSend(tgQueue, &tgMsg, 0) != pdTRUE) {
-        logCapture("[%s] Queue full, spilling photo to SD\n", TAG);
-#ifdef INCLUDE_SD_CARD
-        persistPhotoToSd(copy, len, tgMsg.text);
-#endif
+        // No synchronous SD spill here: this runs in the caller's (detection) task and
+        // SD I/O would stall it for seconds. The photo is dropped; the telegram task
+        // spills to SD itself when a send fails.
+        logCapture("[%s] Queue full, photo dropped\n", TAG);
         free(copy);
+        return false;
     }
+    return true;
 }
 
 // Rich boot notification sent once Telegram API is reachable. Includes
@@ -862,11 +956,12 @@ static void registerBotCommands() {
 
     String url = "https://api.telegram.org/bot" + appConfig.telegram.bot_token + "/setMyCommands";
 
+    esp_task_wdt_reset();
     HTTPClient http;
     WiFiClientSecure client;
-    client.setInsecure();
+    tgPrepClient(client);
     if (!http.begin(client, url)) return;
-    http.setTimeout(8000);
+    tgPrepHttp(http, 8000);
     http.addHeader("Content-Type", "application/json");
 
     // Keep short — Telegram shows max ~8 comfortably in the slide-up menu.
@@ -884,6 +979,7 @@ static void registerBotCommands() {
 
     int code = http.POST(body);
     http.end();
+    esp_task_wdt_reset();
     logCapture("[%s] setMyCommands: HTTP %d\n", TAG, code);
 }
 
@@ -926,6 +1022,11 @@ void telegramTask(void* param) {
     while (true) {
         esp_task_wdt_reset();
         if (!appConfig.telegram.enabled || !isTelegramConnected()) {
+            // Disabled: drop whatever is queued so the PSRAM copies are not held forever.
+            TelegramMessage dead;
+            while (tgQueue && xQueueReceive(tgQueue, &dead, 0) == pdTRUE) {
+                if (dead.photo_data) free(dead.photo_data);
+            }
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
@@ -945,8 +1046,22 @@ void telegramTask(void* param) {
             sendTextSync("\xF0\x9F\x94\x94 Ticho skončilo, notifikace obnoveny.");
         }
 
+        // Poll interval is user-configurable: clamp it here (the loader does not) and
+        // wait in <=5 s slices so the task watchdog is fed however long it is.
+        int pollCfg = appConfig.telegram.poll_interval_ms;
+        uint32_t pollMs = pollCfg < 1000 ? 1000 : (pollCfg > 60000 ? 60000 : (uint32_t)pollCfg);
         TelegramMessage msg;
-        if (xQueueReceive(tgQueue, &msg, pdMS_TO_TICKS(appConfig.telegram.poll_interval_ms)) == pdTRUE) {
+        bool gotMsg = false;
+        for (uint32_t waited = 0; waited < pollMs && !gotMsg; ) {
+            uint32_t slice = pollMs - waited;
+            if (slice > 5000) slice = 5000;
+            gotMsg = (xQueueReceive(tgQueue, &msg, pdMS_TO_TICKS(slice)) == pdTRUE);
+            waited += slice;
+            esp_task_wdt_reset();
+            if (!appConfig.telegram.enabled) break;
+        }
+        if (!gotMsg && !appConfig.telegram.enabled) continue;  // disabled mid-wait
+        if (gotMsg) {
             bool sent = true;
             if (msg.has_photo) {
                 sent = sendPhotoSync(msg.photo_data, msg.photo_len, msg.text);
@@ -964,7 +1079,7 @@ void telegramTask(void* param) {
             } else if (msg.text[0]) {
                 sendTextSync(msg.text);
             }
-            lastTgSendTime = millis();
+            markTgSent();
         } else {
             // Queue timeout — poll for incoming commands, then drain one pending photo.
             checkTelegramUpdates();

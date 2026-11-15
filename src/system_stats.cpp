@@ -62,15 +62,20 @@ static bool statsLoad() {
 
 static bool statsSave() {
     StatsFile sf = { STATS_MAGIC, STATS_VERSION, 0, sysStats };
-    File f = LittleFS.open(STATS_FILE, "w");
+    // Temp file + rename: a power cut during a direct overwrite left a short file,
+    // which statsLoad() rejects, wiping all accumulated restart counters.
+    String tmp = String(STATS_FILE) + ".tmp";
+    File f = LittleFS.open(tmp, "w");
     if (!f) {
-        logCapture("[%s] Cannot open %s for write\n", TAG, STATS_FILE);
+        logCapture("[%s] Cannot open %s for write\n", TAG, tmp.c_str());
         return false;
     }
     size_t written = f.write((const uint8_t*)&sf, sizeof(sf));
     f.close();
     lastSaveMs = millis();
-    return written == sizeof(sf);
+    if (written != sizeof(sf)) { LittleFS.remove(tmp); return false; }
+    if (!LittleFS.rename(tmp, STATS_FILE)) { LittleFS.remove(tmp); return false; }
+    return true;
 }
 
 void systemStatsBegin() {

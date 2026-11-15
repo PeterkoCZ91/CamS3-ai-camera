@@ -40,6 +40,10 @@ static const char* TAG = "FaceDet";
 
 static uint8_t* faceDecodeBuf = NULL;
 
+// PSRAM copy of the JPEG for SD save / Telegram photo, allocated once and held, so
+// the ring slot is released before any slow I/O. Only the face task touches it.
+static uint8_t* jpegCopy = NULL;
+
 // Detectors (allocated on init)
 static HumanFaceDetectMSR01* detector1 = NULL;
 static HumanFaceDetectMNP01* detector2 = NULL;
@@ -146,23 +150,30 @@ void faceDetectTask(void* param) {
             cameraDecodeUnlock();
         }
 
-        // Copy JPEG data for potential SD save before releasing ring buffer
-        uint8_t* saveBuf = NULL;
+        // Copy JPEG data (SD save and/or Telegram photo) before releasing the slot.
+        // The Telegram photo needs it even without save_to_sd.
         size_t saveLen = 0;
-        #ifdef INCLUDE_SD_CARD
-        if (appConfig.face_detect.save_to_sd && decoded) {
-            saveBuf = (uint8_t*)malloc(len);
-            if (saveBuf) {
-                memcpy(saveBuf, buf, len);
-                saveLen = len;
+        if (decoded) {
+            bool needCopy = false;
+            #ifdef INCLUDE_SD_CARD
+            if (appConfig.face_detect.save_to_sd) needCopy = true;
+            #endif
+            #ifdef INCLUDE_TELEGRAM
+            if (appConfig.telegram.enabled && appConfig.telegram.notify_on_face &&
+                appConfig.telegram.photo_on_face) needCopy = true;
+            #endif
+            if (needCopy) {
+                if (!jpegCopy) jpegCopy = (uint8_t*)ps_malloc(IMG_JPEG_COPY_MAX);
+                if (jpegCopy && len > 0 && len <= IMG_JPEG_COPY_MAX) {
+                    memcpy(jpegCopy, buf, len);
+                    saveLen = len;
+                }
             }
         }
-        #endif
 
         ringBufferRelease(rh);
 
         if (!decoded) {
-            if (saveBuf) free(saveBuf);
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
@@ -228,8 +239,8 @@ void faceDetectTask(void* param) {
             #endif
 
             #ifdef INCLUDE_SD_CARD
-            if (saveBuf && saveLen > 0 && sdStoreAvailable()) {
-                sdStoreWriteJpeg("/captures", "face_", saveBuf, saveLen);
+            if (appConfig.face_detect.save_to_sd && saveLen > 0 && sdStoreAvailable()) {
+                sdStoreWriteJpeg("/captures", "face_", jpegCopy, saveLen);
             }
             #endif
 
@@ -242,8 +253,8 @@ void faceDetectTask(void* param) {
                          czPlural(faceCount, "Detekován", "Detekovány", "Detekováno"),
                          faceCount,
                          czPlural(faceCount, "obličej", "obličeje", "obličejů"));
-                if (appConfig.telegram.photo_on_face && saveBuf && saveLen > 0) {
-                    telegramSendPhoto(saveBuf, saveLen, caption);
+                if (appConfig.telegram.photo_on_face && saveLen > 0) {
+                    telegramSendPhoto(jpegCopy, saveLen, caption);
                 } else {
                     telegramSendText(caption);
                 }
@@ -254,8 +265,6 @@ void faceDetectTask(void* param) {
                 faceDetected = false;
             }
         }
-
-        if (saveBuf) free(saveBuf);
 
         // Face detection is heavier, run at ~2 fps
         vTaskDelay(pdMS_TO_TICKS(500));

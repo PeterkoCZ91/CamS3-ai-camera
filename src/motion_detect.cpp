@@ -68,12 +68,20 @@ static SemaphoreHandle_t cascadeSemaphore = NULL;
 // Region of interest. roiMask[i] == 0 means "ignore this block".
 // roiActiveBlocks is the denominator for the trigger percentage, so masking off
 // half the frame does not halve the effective sensitivity in the rest of it.
+// The HTTP task writes it while the motion task reads it, so writers build the new
+// mask in a local copy and publish it (mask + count together) under a short
+// critical section; the motion task takes one snapshot per frame.
 static uint8_t roiMask[MOTION_GRID_SIZE];
 static int     roiActiveBlocks = MOTION_GRID_SIZE;
+static portMUX_TYPE roiMux = portMUX_INITIALIZER_UNLOCKED;
 
 void motionDetectClearRoiMask() {
-    memset(roiMask, 1, sizeof(roiMask));
+    uint8_t all[MOTION_GRID_SIZE];
+    memset(all, 1, sizeof(all));
+    portENTER_CRITICAL(&roiMux);
+    memcpy(roiMask, all, sizeof(roiMask));
     roiActiveBlocks = MOTION_GRID_SIZE;
+    portEXIT_CRITICAL(&roiMux);
 }
 
 bool motionDetectSetRoiMask(const char* mask, int len) {
@@ -82,20 +90,50 @@ bool motionDetectSetRoiMask(const char* mask, int len) {
         return false;
     }
     int active = 0;
+    uint8_t local[MOTION_GRID_SIZE];
     for (int i = 0; i < MOTION_GRID_SIZE; i++) {
-        roiMask[i] = (mask[i] == '0') ? 0 : 1;
-        if (roiMask[i]) active++;
+        local[i] = (mask[i] == '0') ? 0 : 1;
+        if (local[i]) active++;
     }
     // An all-zero mask would make detection impossible; treat it as "no mask".
     if (active == 0) {
         motionDetectClearRoiMask();
         return false;
     }
+    portENTER_CRITICAL(&roiMux);
+    memcpy(roiMask, local, sizeof(roiMask));
     roiActiveBlocks = active;
+    portEXIT_CRITICAL(&roiMux);
     return true;
 }
 
 int motionDetectRoiActiveBlocks() { return roiActiveBlocks; }
+
+#if defined(INCLUDE_SD_CARD) || defined(INCLUDE_TELEGRAM)
+// PSRAM scratch for a JPEG copied out of its ring slot, allocated once and held.
+// Telegram enqueue and SD writes are slow (SD can block for hundreds of ms, and
+// telegramSendPhoto may persist synchronously when its queue is full), so the slot
+// is released before either runs. Only the motion task touches this buffer.
+static uint8_t* jpegCopy = NULL;
+
+// Copies the latest frame into jpegCopy and releases its slot. Returns the length,
+// or 0 when there is no frame, no buffer, or the frame exceeds the buffer.
+static size_t copyLatestJpeg() {
+    if (!jpegCopy) jpegCopy = (uint8_t*)ps_malloc(IMG_JPEG_COPY_MAX);
+    if (!jpegCopy) return 0;
+    const uint8_t* b = NULL;
+    size_t l = 0;
+    int h = ringBufferGetLatest(&b, &l);
+    if (h < 0) return 0;
+    size_t out = 0;
+    if (l > 0 && l <= IMG_JPEG_COPY_MAX) {
+        memcpy(jpegCopy, b, l);
+        out = l;
+    }
+    ringBufferRelease(h);
+    return out;
+}
+#endif
 
 #ifdef INCLUDE_TELEGRAM
 // millis() when a motion notification was deferred pending the person verdict.
@@ -104,12 +142,9 @@ static unsigned long fallbackArmedAt = 0;
 
 static void sendMotionNotification() {
     if (appConfig.telegram.photo_on_motion) {
-        const uint8_t* tgBuf = NULL;
-        size_t tgLen = 0;
-        int th = ringBufferGetLatest(&tgBuf, &tgLen);
-        if (th >= 0) {
-            telegramSendPhoto(tgBuf, tgLen, "Pohyb detekován");
-            ringBufferRelease(th);
+        size_t tgLen = copyLatestJpeg();
+        if (tgLen > 0) {
+            telegramSendPhoto(jpegCopy, tgLen, "Pohyb detekován");
         }
     } else {
         telegramSendText("Pohyb detekován");
@@ -383,6 +418,7 @@ void motionDetectTask(void* param) {
                 bgModel[i] = bgModel[i] * trainAlpha + (float)blockGrid[i] * (1.0f - trainAlpha);
             }
             trainingCount++;
+            prevAvgBrightness = (int)avgBrightness;
             motionDetected = false;
             vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -451,6 +487,14 @@ void motionDetectTask(void* param) {
         memcpy(prevDiffMask, diffMask, MOTION_GRID_SIZE);
         memset(diffMask, 0, MOTION_GRID_SIZE);
 
+        // One consistent ROI snapshot per frame (HTTP task may replace it any time).
+        uint8_t roiLocal[MOTION_GRID_SIZE];
+        int roiActiveLocal;
+        portENTER_CRITICAL(&roiMux);
+        memcpy(roiLocal, roiMask, MOTION_GRID_SIZE);
+        roiActiveLocal = roiActiveBlocks;
+        portEXIT_CRITICAL(&roiMux);
+
         int activeBlocks = 0;
         for (int i = 0; i < MOTION_GRID_SIZE; i++) {
             float diff = fabsf((float)blockGrid[i] - bgModel[i]);
@@ -458,7 +502,7 @@ void motionDetectTask(void* param) {
             if (diff > adaptiveThreshold && relDiff > MOTION_REL_THRESHOLD) {
                 // Masked-out blocks still track the background (so re-enabling the
                 // ROI later does not fire a false positive) but never count as motion.
-                if (roiMask[i]) {
+                if (roiLocal[i]) {
                     diffMask[i] = 1;
                     activeBlocks++;
                 }
@@ -472,7 +516,7 @@ void motionDetectTask(void* param) {
         // Step 9: Calculate changed percentage, over the ROI area rather than the
         // full grid — otherwise masking off part of the frame silently raises the
         // effective trigger threshold for the part that is still watched.
-        float roiArea = (float)(roiActiveBlocks > 0 ? roiActiveBlocks : MOTION_GRID_SIZE);
+        float roiArea = (float)(roiActiveLocal > 0 ? roiActiveLocal : MOTION_GRID_SIZE);
         float changedPct = (float)activeBlocks * 100.0f / roiArea;
 
         // Step 10: Upper reject - if too many blocks changed, it is likely a lighting change
@@ -547,17 +591,22 @@ void motionDetectTask(void* param) {
         //       allowing intentional periodic re-notifications for long events.
         if (motionConfirmed) {
             unsigned long now = millis();
-            unsigned long cooldownMs = appConfig.motion.cooldown_sec * 1000UL;
+            int cooldownSec = appConfig.motion.cooldown_sec;
+            if (cooldownSec < 0) cooldownSec = 0;
+            unsigned long cooldownMs = (unsigned long)cooldownSec * 1000UL;
             // Rising edge also needs cooldown_sec since the last fired event: motionDetected
             // clears after 5 s quiet, which capped the effective cooldown at ~5 s.
+            // lastMotionTime is bumped on every confirmed frame, so measuring the
+            // cooldown from it (the old cooldownExpired) could never fire during
+            // continuous motion. lastEventTime only moves when an event fires.
             bool cooldownOver = (motionEventCount == 0) || (now - lastEventTime >= cooldownMs);
-            bool risingEdge = !motionDetected && cooldownOver;
-            bool cooldownExpired = motionDetected && (now - lastMotionTime > cooldownMs);
+            bool risingEdge = !motionDetected;   // used for log text only
+            bool fire = cooldownOver;
 
             motionDetected = true;
             lastMotionTime = now;
 
-            if (risingEdge || cooldownExpired) {
+            if (fire) {
                 lastEventTime = now;
                 motionEventCount++;
 
@@ -600,13 +649,11 @@ void motionDetectTask(void* param) {
                 // sdStoreWriteJpeg handles rotation and the failure breaker; the old
                 // inline SD.open() silently did nothing once the card was full.
                 if (appConfig.motion.save_to_sd && sdStoreAvailable()) {
-                    // Grab a fresh frame for saving (full resolution)
-                    const uint8_t* saveBuf = NULL;
-                    size_t saveLen = 0;
-                    int sh = ringBufferGetLatest(&saveBuf, &saveLen);
-                    if (sh >= 0) {
-                        sdStoreWriteJpeg("/captures", "motion_", saveBuf, saveLen);
-                        ringBufferRelease(sh);
+                    // Grab a fresh frame for saving (full resolution), copy it out
+                    // and release the slot before touching the card.
+                    size_t saveLen = copyLatestJpeg();
+                    if (saveLen > 0) {
+                        sdStoreWriteJpeg("/captures", "motion_", jpegCopy, saveLen);
                     }
                 }
                 #endif

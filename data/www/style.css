@@ -481,8 +481,8 @@ select option { background: #1a1a2e; color: #e0e0e0; }
 }
 .file-item:hover { background: var(--bg-card-hover); }
 .file-item:last-child { border-bottom: none; }
-.file-name { font-size: .9em; color: #fff; }
-.file-size { font-size: .8em; color: var(--text-muted); }
+.file-name { font-size: .9em; color: #fff; overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+.file-size { font-size: .8em; color: var(--text-muted); overflow-wrap: anywhere; }
 .file-actions { display: flex; gap: 6px; }
 
 /* Modal dialogs (admin confirm, gallery preview) */
@@ -523,7 +523,16 @@ select option { background: #1a1a2e; color: #e0e0e0; }
     .pg-header h1 { font-size: 1.1em; }
     .controls { grid-template-columns: 1fr; }
     .info-grid { grid-template-columns: repeat(2, 1fr); }
-    .nav-tabs { flex-wrap: nowrap; overflow-x: auto; }
+    .nav-tabs {
+        flex-wrap: nowrap; overflow-x: auto;
+        /* Edge shadows that disappear once scrolled to that edge: shows the row scrolls. */
+        background:
+            linear-gradient(to right, var(--bg-card) 30%, transparent) left center / 24px 100% no-repeat local,
+            linear-gradient(to left, var(--bg-card) 30%, transparent) right center / 24px 100% no-repeat local,
+            radial-gradient(farthest-side at 0 50%, rgba(255,255,255,.18), transparent) left center / 10px 100% no-repeat scroll,
+            radial-gradient(farthest-side at 100% 50%, rgba(255,255,255,.18), transparent) right center / 10px 100% no-repeat scroll,
+            var(--bg-card);
+    }
     .sec-body { padding: 4px 14px 14px; }
 }
 

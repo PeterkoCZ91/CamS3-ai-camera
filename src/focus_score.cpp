@@ -110,7 +110,7 @@ void focusScoreTouch(bool resetPeak) {
     bool start = !taskStarted;
     taskStarted = true;
     portEXIT_CRITICAL(&mux);
-    if (start && xTaskCreate(focusTask, "focus", 4096, NULL, 1, NULL) != pdPASS) {
+    if (start && xTaskCreate(focusTask, "focus", 6144, NULL, 1, NULL) != pdPASS) {
         taskStarted = false;
         logCapture("[%s] task create failed\n", TAG);
     }

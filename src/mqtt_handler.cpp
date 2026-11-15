@@ -87,7 +87,8 @@ static void mqttQueueFlush() {
     int replayed = 0;
     while (mqttQueueCount > 0 && mqttClient.connected()) {
         MqttQueuedMsg& slot = mqttQueue[idx];
-        mqttClient.publish(slot.topic, slot.payload, slot.retained, slot.qos);
+        esp_task_wdt_reset();
+        if (!mqttClient.publish(slot.topic, slot.payload, slot.retained, slot.qos)) break;  // keep the rest queued
         idx = (idx + 1) % MQTT_QUEUE_CAP;
         mqttQueueCount--;
         replayed++;
@@ -184,28 +185,35 @@ static void mqttHandlePendingConfig() {
     strlcpy(payload, pendingConfigPayload, sizeof(payload));
     pendingConfigMessage = false;
 
-    bool needSave = false;
+    bool needSave = false;   // a recognised key whose value actually differs
+    bool recognised = false;
     if (strcmp(key, "motion/enabled") == 0 || strcmp(key, "motion_enabled") == 0) {
-        appConfig.motion.enabled = (strcasecmp(payload, "ON") == 0 ||
-                                    strcasecmp(payload, "true") == 0 ||
-                                    strcmp(payload, "1") == 0);
-        needSave = true;
+        bool v = (strcasecmp(payload, "ON") == 0 ||
+                  strcasecmp(payload, "true") == 0 ||
+                  strcmp(payload, "1") == 0);
+        recognised = true;
+        if (appConfig.motion.enabled != v) { appConfig.motion.enabled = v; needSave = true; }
     } else if (strcmp(key, "motion/threshold") == 0 || strcmp(key, "motion_threshold") == 0) {
         int value = atoi(payload);
         if (value >= 5 && value <= 80) {
-            appConfig.motion.threshold = value;
-            needSave = true;
+            recognised = true;
+            if (appConfig.motion.threshold != value) { appConfig.motion.threshold = value; needSave = true; }
         }
     } else if (strcmp(key, "person/enabled") == 0 || strcmp(key, "person_detect_enabled") == 0) {
-        appConfig.person_detect.enabled = (strcasecmp(payload, "ON") == 0 ||
-                                           strcasecmp(payload, "true") == 0 ||
-                                           strcmp(payload, "1") == 0);
-        needSave = true;
+        bool v = (strcasecmp(payload, "ON") == 0 ||
+                  strcasecmp(payload, "true") == 0 ||
+                  strcmp(payload, "1") == 0);
+        recognised = true;
+        if (appConfig.person_detect.enabled != v) { appConfig.person_detect.enabled = v; needSave = true; }
     }
 
+    // Skip the flash write when nothing changed (a retained message is redelivered
+    // after every reconnect and would otherwise wear the flash).
     if (needSave) {
         saveConfig();
         logCapture("[%s] Applied MQTT config %s=%s\n", TAG, key, payload);
+    } else if (recognised) {
+        logCapture("[%s] MQTT config %s=%s unchanged\n", TAG, key, payload);
     } else {
         logCapture("[%s] Ignored MQTT config %s=%s\n", TAG, key, payload);
     }
@@ -215,19 +223,21 @@ static void mqttHandlePendingConfig() {
 
 // Serialize + publish one discovery doc; skip (and log) instead of sending cut-off
 // JSON when it would not fit the scratch buffer / MQTT client buffer.
-static void publishDiscoveryDoc(const String& topic, JsonDocument& doc) {
+static bool publishDiscoveryDoc(const String& topic, JsonDocument& doc) {
     char payload[768];
     size_t need = measureJson(doc);
     if (need >= sizeof(payload) || need + topic.length() + 16 > 1024) {
         logCapture("[%s] Discovery payload too large (%u B), skipped: %s\n",
                    TAG, (unsigned)need, topic.c_str());
-        return;
+        return true;  // retrying cannot help; do not block haDiscoverySent on it
     }
     serializeJson(doc, payload, sizeof(payload));
-    mqttClient.publish(topic.c_str(), payload, true, 1);
+    esp_task_wdt_reset();
+    return mqttClient.publish(topic.c_str(), payload, true, 1);
 }
 
 static void publishDiscovery() {
+    bool allOk = true;
     String deviceId = safeHostname();
     String deviceName = DEVICE_NAME;
 
@@ -256,7 +266,7 @@ static void publishDiscovery() {
         dev["connections"][0][0] = "mac";
         dev["connections"][0][1] = WiFi.macAddress();
 
-        publishDiscoveryDoc(topic, doc);
+        if (!publishDiscoveryDoc(topic, doc)) allOk = false;
     }
 
     // Person binary sensor
@@ -277,7 +287,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        publishDiscoveryDoc(topic, doc);
+        if (!publishDiscoveryDoc(topic, doc)) allOk = false;
     }
 
     // Face binary sensor
@@ -297,7 +307,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        publishDiscoveryDoc(topic, doc);
+        if (!publishDiscoveryDoc(topic, doc)) allOk = false;
     }
 
     // Status sensor (uptime as primary value, full JSON available as attributes)
@@ -319,7 +329,7 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        publishDiscoveryDoc(topic, doc);
+        if (!publishDiscoveryDoc(topic, doc)) allOk = false;
     }
 
     // Diagnostic sensors extracted from the /status JSON via value_template.
@@ -359,11 +369,15 @@ static void publishDiscovery() {
         dev["identifiers"][0] = deviceId;
         dev["name"] = deviceName;
 
-        publishDiscoveryDoc(topic, doc);
+        if (!publishDiscoveryDoc(topic, doc)) allOk = false;
     }
 
-    logCapture("[%s] HA discovery payloads published\n", TAG);
-    haDiscoverySent = true;
+    if (allOk) {
+        logCapture("[%s] HA discovery payloads published\n", TAG);
+    } else {
+        logCapture("[%s] HA discovery publish failed, will retry on next connect\n", TAG);
+    }
+    haDiscoverySent = allOk;
 }
 
 static bool mqttConnect() {
@@ -380,9 +394,12 @@ static bool mqttConnect() {
             }
             mqttSecureInUse = true;
         }
+        mqttNetSecure.setHandshakeTimeout(8000);  // ms on arduino-esp32 2.x
+        mqttNetSecure.setTimeout(8);              // seconds
         mqttClient.begin(appConfig.mqtt.server.c_str(), appConfig.mqtt.port, mqttNetSecure);
     } else {
         mqttSecureInUse = false;
+        mqttNet.setTimeout(5);  // seconds: bounds the TCP connect
         mqttClient.begin(appConfig.mqtt.server.c_str(), appConfig.mqtt.port, mqttNet);
     }
     // LWT: broker marks us offline if the connection drops unexpectedly.
@@ -390,6 +407,7 @@ static bool mqttConnect() {
 
     String clientId = safeHostname();
     bool ok;
+    esp_task_wdt_reset();
     if (appConfig.mqtt.user.length() > 0) {
         ok = mqttClient.connect(clientId.c_str(),
                                 appConfig.mqtt.user.c_str(),
@@ -398,6 +416,7 @@ static bool mqttConnect() {
         ok = mqttClient.connect(clientId.c_str());
     }
 
+    esp_task_wdt_reset();
     if (ok) {
         mqttConnects++;
         mqttLinkUpSinceMs = millis();
@@ -565,20 +584,39 @@ void mqttTask(void* param) {
     // Force one motion publish after every (re)connect: prevMotion restarts at false,
     // so a stale retained ON on the broker would otherwise never be corrected.
     bool forceMotionPublish = true;
+    // Reconnect backoff: 5 s doubling to 60 s, reset on success.
+    unsigned long reconnectDelayMs = 5000;
 
     while (true) {
         esp_task_wdt_reset();
         if (!appConfig.mqtt.enabled) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            if (mqttClient.connected()) {
+                // Disabled at runtime: leave the broker cleanly instead of staying attached.
+                mqttClient.publish(availabilityTopic().c_str(), "offline", true, 1);
+                mqttClient.disconnect();
+                mqttLinkUpSinceMs = 0;
+                logCapture("[%s] MQTT disabled, disconnected\n", TAG);
+            }
             haDiscoverySent = false;
+            forceMotionPublish = true;
+            reconnectDelayMs = 5000;
+            vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
 
         // Reconnect if needed
         if (!mqttClient.connected()) {
-            if (millis() - lastReconnectAttempt > 10000) {
+            if (lastReconnectAttempt == 0 || millis() - lastReconnectAttempt > reconnectDelayMs) {
                 lastReconnectAttempt = millis();
-                if (mqttConnect()) forceMotionPublish = true;
+                if (lastReconnectAttempt == 0) lastReconnectAttempt = 1;
+                if (mqttConnect()) {
+                    forceMotionPublish = true;
+                    reconnectDelayMs = 5000;
+                } else {
+                    reconnectDelayMs = reconnectDelayMs * 2;
+                    if (reconnectDelayMs > 60000) reconnectDelayMs = 60000;
+                }
+                esp_task_wdt_reset();
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
@@ -638,8 +676,6 @@ void mqttTask(void* param) {
     }
 }
 
-#endif // INCLUDE_MQTT
-
 MqttLinkStats mqttGetLinkStats() {
     MqttLinkStats s;
     bool up = mqttClient.connected();
@@ -649,3 +685,12 @@ MqttLinkStats mqttGetLinkStats() {
     s.link_uptime_s = up ? (millis() - mqttLinkUpSinceMs) / 1000 : 0;
     return s;
 }
+
+#else  // !INCLUDE_MQTT
+
+MqttLinkStats mqttGetLinkStats() {
+    MqttLinkStats s = {-1, 0, 0, 0};
+    return s;
+}
+
+#endif // INCLUDE_MQTT

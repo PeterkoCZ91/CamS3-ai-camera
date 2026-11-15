@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Wi-Fi - CamS3</title>
+    <title data-i18n="title.wifi">Wi-Fi - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
     <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
@@ -50,7 +50,7 @@
             <div class="card-body">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
                     <span style="font-weight:600;color:#fff" data-i18n="wifi.scan.title">Available networks</span>
-                    <button class="btn btn-outline btn-sm" onclick="scanNetworks()" data-i18n="common.scan">Scan</button>
+                    <button class="btn btn-outline btn-sm" id="scan-btn" onclick="scanNetworks()" data-i18n="common.scan">Scan</button>
                 </div>
                 <div id="network-list" style="color:var(--text-muted);font-size:.9em" data-i18n="wifi.scan.hint">
                     Click "Scan" to load networks
@@ -100,17 +100,35 @@
 
     function scanNetworks() {
         const list = document.getElementById('network-list');
+        const scanBtn = document.getElementById('scan-btn');
+        if (scanBtn.disabled) return;
+        scanBtn.disabled = true;
         list.textContent = '';
-        list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">' +
-            escapeHtml(T('wifi.scan.searching')) + '</div>';
+        const searching = document.createElement('div');
+        searching.style.cssText = 'text-align:center;padding:20px;color:var(--text-muted)';
+        searching.textContent = T('wifi.scan.searching');
+        list.appendChild(searching);
 
-        fetch('/api/wifi/scan').then(r => r.json()).then(networks => {
+        apiFetch('/api/wifi/scan').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(raw => {
+            // The same SSID shows up once per access point: keep the strongest.
+            const best = new Map();
+            raw.forEach(n => {
+                const prev = best.get(n.ssid);
+                if (!prev || n.rssi > prev.rssi) best.set(n.ssid, n);
+            });
+            const networks = Array.from(best.values());
             if (!networks.length) {
-                list.innerHTML = '<div style="padding:12px;color:var(--text-muted)">' +
-                    escapeHtml(T('wifi.scan.none')) + '</div>';
+                list.textContent = '';
+                const none = document.createElement('div');
+                none.style.cssText = 'padding:12px;color:var(--text-muted)';
+                none.textContent = T('wifi.scan.none');
+                list.appendChild(none);
                 return;
             }
-            list.innerHTML = '';
+            list.textContent = '';
             networks.sort((a, b) => b.rssi - a.rssi);
             networks.forEach(n => {
                 const strength = n.rssi > -50 ? T('wifi.strength.excellent')
@@ -140,9 +158,13 @@
                 list.appendChild(row);
             });
         }).catch(() => {
-            list.innerHTML = '<div style="padding:12px;color:var(--red)">' +
-                escapeHtml(T('wifi.scan.error')) + '</div>';
-        });
+            list.textContent = '';
+            const err = document.createElement('div');
+            err.style.cssText = 'padding:12px;color:var(--red)';
+            err.setAttribute('role', 'alert');
+            err.textContent = T('wifi.scan.error');
+            list.appendChild(err);
+        }).finally(() => { scanBtn.disabled = false; });
     }
 
     function selectNetwork(ssid) {
@@ -164,13 +186,17 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ssid: ssid, password: pass})
         })
-        .then(r => r.json())
-        .then(result => {
-            showToast(result.message, result.success ? 'success' : 'error');
-            if (result.success) {
+        .then(r => r.json().catch(() => ({})).then(result => ({ r, result })))
+        .then(({ r, result }) => {
+            const ok = r.ok && result.success !== false;
+            if (r.status === 401) return;   // apiFetch already showed the 401 toast
+            showToast(result.message || (ok ? T('common.saved') : T('common.error') + ' (HTTP ' + r.status + ')'),
+                      ok ? 'success' : 'error');
+            if (ok) {
                 setTimeout(() => { showToast(T('wifi.connecting.note'), 'info'); }, 2000);
             }
         })
+        // Only a network failure (fetch rejected) means the device is unreachable.
         .catch(() => showToast(T('common.offline'), 'error'));
     }
 

@@ -64,20 +64,30 @@ static AsyncWebSocket ws("/ws");
 static void setupApiRoutes();
 static void setupWebSocket();
 static void setupStaticFiles();
-extern void saveSecretsToNVS();
 
 // HTTP Basic Auth check for sensitive endpoints.
 // Returns true when authorized; otherwise sends 401 and returns false.
 static bool requireAuth(AsyncWebServerRequest* request) {
-    const String& user = appConfig.auth.http_user;
-    const String& pass = appConfig.auth.http_pass;
-    // Empty credentials = auth disabled (keeps local dev simple; production should set them).
-    if (user.length() == 0 || pass.length() == 0) return true;
+    // Fail closed: empty credentials (e.g. a blank "user" in config.json) used to
+    // disable auth entirely. Fall back to the defaults instead, so the device stays
+    // protected and reachable.
+    String user = appConfig.auth.http_user.length() ? appConfig.auth.http_user : String(DEFAULT_HTTP_USER);
+    String pass = appConfig.auth.http_pass.length() ? appConfig.auth.http_pass : String(DEFAULT_HTTP_PASS);
     if (!request->authenticate(user.c_str(), pass.c_str())) {
         request->requestAuthentication();
         return false;
     }
     return true;
+}
+
+// ElegantOTA keeps its own copy of the credentials, set once at startup; without a
+// refresh the OTA page kept accepting the OLD password after a change.
+static void applyOtaAuth() {
+#ifdef INCLUDE_OTA
+    String user = appConfig.auth.http_user.length() ? appConfig.auth.http_user : String(DEFAULT_HTTP_USER);
+    String pass = appConfig.auth.http_pass.length() ? appConfig.auth.http_pass : String(DEFAULT_HTTP_PASS);
+    ElegantOTA.setAuth(user.c_str(), pass.c_str());
+#endif
 }
 
 // Session-lifetime CSRF token. Rotates on reboot; held in RAM only.
@@ -590,6 +600,9 @@ static void handleApiSensor(AsyncWebServerRequest* request) {
 // error (a response has already been sent in that case).
 static int accumulateJsonBody(AsyncWebServerRequest* request, uint8_t* data,
                               size_t len, size_t index, size_t total) {
+    // A later chunk of a request already answered at index 0 (auth/CSRF reject, 413,
+    // OOM) has no buffer; stay silent instead of sending a second (500) response.
+    if (index > 0 && !request->_tempObject) return -1;
     if (index == 0) {
         if (request->_tempObject) { free(request->_tempObject); request->_tempObject = NULL; }
         if (total == 0 || total > MAX_JSON_BODY) {
@@ -610,10 +623,27 @@ static int accumulateJsonBody(AsyncWebServerRequest* request, uint8_t* data,
     return (index + len == total) ? 1 : 0;
 }
 
-// API: POST /api/settings - apply camera and app settings
-static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+// Auth + CSRF only on the first chunk of a body: the body callback runs once per TCP
+// chunk, so checking every time produced several responses for one request.
+static bool bodyPreamble(AsyncWebServerRequest* request, size_t index) {
+    if (index != 0) return true;
+    if (!requireAuth(request)) return false;
+    if (!requireCsrf(request)) return false;
+    return true;
+}
+
+// onRequest handler for body routes: a POST with an empty body never reaches the body
+// callback, so nothing used to answer it and the client hung until timeout.
+static void emptyBodyReply(AsyncWebServerRequest* request) {
+    if (request->getResponse()) return;   // body callback already answered
     if (!requireAuth(request)) return;
     if (!requireCsrf(request)) return;
+    request->send(400, "application/json", "{\"success\":false,\"message\":\"Empty body\"}");
+}
+
+// API: POST /api/settings - apply camera and app settings
+static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+    if (!bodyPreamble(request, index)) return;
 
     // AsyncWebServer calls this per TCP chunk; the settings payload exceeds one MTU.
     if (accumulateJsonBody(request, data, len, index, total) != 1) return;
@@ -633,6 +663,8 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     // Keys present in the body but not applied (unknown name or wrong type) are
     // reported back in `ignored`; `ok` records every key a branch below accepted.
     JsonDocument appliedKeys;
+    bool secretsOk = true;   // false if any NVS write failed: must not be reported as success
+    bool authChanged = false;
     auto ok = [&appliedKeys](const char* key, bool match) {
         if (match) appliedKeys[key] = true;
         return match;
@@ -733,23 +765,42 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         if (srv.length() > 0) { appConfig.mqtt.server = srv; needSave = true; }
     }
     if (ok("mqtt_port", doc["mqtt_port"].is<int>()))             { appConfig.mqtt.port         = clampInt(doc["mqtt_port"], 1, 65535); needSave = true; }
-    if (ok("mqtt_topic_prefix", doc["mqtt_topic_prefix"].is<const char*>())) { appConfig.mqtt.topic_prefix = doc["mqtt_topic_prefix"].as<String>(); needSave = true; }
+    if (ok("mqtt_topic_prefix", doc["mqtt_topic_prefix"].is<const char*>())) {
+        String tp = doc["mqtt_topic_prefix"].as<String>();
+        // 1..32 chars of [A-Za-z0-9_/-]: no wildcards, spaces or control characters in topics.
+        bool valid = tp.length() >= 1 && tp.length() <= 32;
+        for (size_t i = 0; valid && i < tp.length(); i++) {
+            char c = tp[i];
+            valid = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                    c == '-' || c == '_' || c == '/';
+        }
+        if (valid) { appConfig.mqtt.topic_prefix = tp; needSave = true; }
+        else appliedKeys.remove("mqtt_topic_prefix");   // rejected -> shows up in `ignored`
+    }
     if (ok("mqtt_tls_enabled", doc["mqtt_tls_enabled"].is<bool>()))     { appConfig.mqtt.tls_enabled  = doc["mqtt_tls_enabled"];  needSave = true; }
     // Broker credentials live in encrypted NVS like the other secrets; without
     // these keys an authenticated broker was simply unusable from the UI.
     if (ok("mqtt_user", doc["mqtt_user"].is<const char*>())) {
         String u = doc["mqtt_user"].as<String>();
-        if (u.length() > 0) { appConfig.mqtt.user = u; saveSecretsToNVS(); }
+        if (u.length() > 0) { appConfig.mqtt.user = u; if (!saveSecretsToNVSChecked()) secretsOk = false; }
     }
     if (ok("mqtt_pass", doc["mqtt_pass"].is<const char*>())) {
         String p = doc["mqtt_pass"].as<String>();
-        if (p.length() > 0) { appConfig.mqtt.password = p; saveSecretsToNVS(); }
+        if (p.length() > 0) { appConfig.mqtt.password = p; if (!saveSecretsToNVSChecked()) secretsOk = false; }
     }
 
     // Network identity
     if (ok("hostname", doc["hostname"].is<const char*>())) {
         String h = doc["hostname"].as<String>();
-        if (h.length() > 0 && h.length() <= 32) { appConfig.wifi.hostname = h; needSave = true; }
+        h.toLowerCase();
+        // DNS label subset [a-z0-9-], 1..32: the value ends up in mDNS and MQTT topics.
+        bool valid = h.length() >= 1 && h.length() <= 32;
+        for (size_t i = 0; valid && i < h.length(); i++) {
+            char c = h[i];
+            valid = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        }
+        if (valid) { appConfig.wifi.hostname = h; needSave = true; }
+        else appliedKeys.remove("hostname");   // rejected -> shows up in `ignored`
     }
 
     // Telegram
@@ -776,14 +827,14 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         String t = doc["telegram_bot_token"].as<String>();
         if (t.length() > 0) {
             appConfig.telegram.bot_token = t;
-            saveSecretsToNVS();
+            if (!saveSecretsToNVSChecked()) secretsOk = false;
         }
     }
     if (ok("telegram_chat_id", doc["telegram_chat_id"].is<const char*>()))    {
         String c = doc["telegram_chat_id"].as<String>();
         if (c.length() > 0) {
             appConfig.telegram.chat_id = c;
-            saveSecretsToNVS();
+            if (!saveSecretsToNVSChecked()) secretsOk = false;
         }
     }
 
@@ -793,6 +844,9 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         if (u.length() > 0 && u.length() <= 32) {
             appConfig.auth.http_user = u;
             needSave = true;
+            authChanged = true;
+        } else if (u.length() > 0) {
+            appliedKeys.remove("http_user");   // too long: reported in `ignored`, not silently "applied"
         }
     }
     if (ok("http_pass", doc["http_pass"].is<const char*>())) {
@@ -800,7 +854,10 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         // Empty field = leave unchanged. Minimum 4 chars to prevent trivial passwords.
         if (p.length() >= 4 && p.length() <= 64) {
             appConfig.auth.http_pass = p;
-            saveSecretsToNVS();
+            if (!saveSecretsToNVSChecked()) secretsOk = false;
+            authChanged = true;
+        } else if (p.length() > 0) {
+            appliedKeys.remove("http_pass");   // too short/long: reported in `ignored`
         }
     }
 
@@ -813,6 +870,11 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     // Frame rates
     if (ok("idle_fps", doc["idle_fps"].is<int>()))   { appConfig.idle_fps   = doc["idle_fps"];   needSave = true; }
     if (ok("active_fps", doc["active_fps"].is<int>())) { appConfig.active_fps = doc["active_fps"]; needSave = true; }
+
+    // One shared clamp (same function the config.json loader uses) covers the
+    // telegram cooldown/hours/poll interval and the fps values assigned above.
+    sanitizeConfig();
+    if (authChanged) applyOtaAuth();
 
     if (appConfig.lens_fov_deg != prevLensFov || appConfig.camera.lenc != prevLenc ||
         appConfig.camera.sharpness != prevSharp) {
@@ -833,8 +895,18 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
         needSave = true;
     }
 
+    bool saved = true;
     if (needSave) {
-        saveConfig();
+        saved = saveConfig();
+    }
+
+    if (!secretsOk || !saved) {
+        // Previously the UI got success even when flash/NVS refused the write.
+        request->send(500, "application/json",
+                      secretsOk ? "{\"success\":false,\"message\":\"Settings applied but could not be saved\"}"
+                                : "{\"success\":false,\"message\":\"Failed to store credentials\"}");
+        ws.textAll(buildStatusJson());
+        return;
     }
 
     JsonDocument resp;
@@ -905,8 +977,7 @@ static void handleApiSnapshot(AsyncWebServerRequest* request) {
 
 // API: POST /api/wifi - connect to network
 static void handleApiWifi(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-    if (!requireAuth(request)) return;
-    if (!requireCsrf(request)) return;
+    if (!bodyPreamble(request, index)) return;
 
     if (accumulateJsonBody(request, data, len, index, total) != 1) return;
 
@@ -942,6 +1013,7 @@ static void scheduleReboot(uint32_t delayMs = 500) {
 
 // API: GET /api/wifi/scan
 static void handleApiWifiScan(AsyncWebServerRequest* request) {
+    if (!requireAuth(request)) return;
     request->send(200, "application/json", scanNetworksJson());
 }
 
@@ -1067,7 +1139,10 @@ static void handleApiSecretsClear(AsyncWebServerRequest* request) {
                       "{\"success\":false,\"message\":\"target must be telegram or mqtt\"}");
         return;
     }
-    saveSecretsToNVS();
+    if (!saveSecretsToNVSChecked()) {
+        request->send(500, "application/json", "{\"success\":false,\"message\":\"NVS write failed\"}");
+        return;
+    }
     request->send(200, "application/json", "{\"success\":true}");
 }
 
@@ -1094,9 +1169,22 @@ static void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
     } else if (type == WS_EVT_DATA) {
         AwsFrameInfo* info = (AwsFrameInfo*)arg;
         if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-            // Log the frame without writing a terminator past the end of the
-            // library's receive buffer (the old `data[len] = 0` did exactly that).
-            logCapture("[%s] WS message: %.*s\n", TAG, (int)len, (const char*)data);
+            // /ws is unauthenticated: rate-limit (1/s), truncate and strip control
+            // characters so a client can neither flood the 100-line log ring nor
+            // forge extra log lines with embedded newlines.
+            static unsigned long lastWsLogMs = 0;
+            unsigned long now = millis();
+            if (now - lastWsLogMs >= 1000) {
+                lastWsLogMs = now;
+                char msg[97];
+                size_t n = len < sizeof(msg) - 1 ? len : sizeof(msg) - 1;
+                for (size_t i = 0; i < n; i++) {
+                    unsigned char c = data[i];
+                    msg[i] = (c < 0x20 || c == 0x7f) ? '?' : (char)c;
+                }
+                msg[n] = '\0';
+                logCapture("[%s] WS message (%u bytes): %s\n", TAG, (unsigned)len, msg);
+            }
         }
     }
 }
@@ -1138,16 +1226,28 @@ static void handleSdList(AsyncWebServerRequest* request) {
         return;
     }
 
+    // Paging: thousands of files built into one JsonDocument were an OOM. The
+    // response is still a plain array; ?offset=&limit= select a window (limit <= 100).
+    int offset = request->hasParam("offset") ? request->getParam("offset")->value().toInt() : 0;
+    int limit  = request->hasParam("limit")  ? request->getParam("limit")->value().toInt()  : 100;
+    if (offset < 0) offset = 0;
+    if (limit < 1 || limit > 100) limit = 100;
+
     JsonDocument doc;
     JsonArray files = doc.to<JsonArray>();
 
+    int idx = 0;
     File entry;
     while ((entry = root.openNextFile())) {
-        JsonObject f = files.add<JsonObject>();
-        f["name"] = String(entry.name());
-        f["size"] = entry.size();
-        f["dir"]  = entry.isDirectory();
+        if (idx >= offset) {
+            JsonObject f = files.add<JsonObject>();
+            f["name"] = String(entry.name());
+            f["size"] = entry.size();
+            f["dir"]  = entry.isDirectory();
+        }
         entry.close();
+        idx++;
+        if (idx >= offset + limit) break;
     }
     root.close();
 
@@ -1235,17 +1335,42 @@ static void handleApiMotionReset(AsyncWebServerRequest* request) {
 
 // API: GET /log - plaintext log output
 static void handleLog(AsyncWebServerRequest* request) {
-    char* logs = logGetAll();
-    if (logs) {
-        request->send(200, "text/plain", logs);
-        free(logs);
-    } else {
-        request->send(503, "text/plain", "Log buffer unavailable");
+    if (!requireAuth(request)) return;
+    char* logs = logGetAll();   // PSRAM; NULL on alloc failure or mutex timeout
+    if (!logs) {
+        request->send(503, "text/plain", "Log buffer busy or unavailable");
+        return;
     }
+    size_t len = strlen(logs);
+    if (len == 0) {
+        free(logs);
+        request->send(200, "text/plain", "");
+        return;
+    }
+    // Stream straight from the PSRAM buffer. send(code, type, const char*) would copy
+    // the whole ~25 kB into an Arduino String in internal DRAM, the scarce resource.
+    struct LogCtx { char* buf; size_t len; };
+    LogCtx* ctx = new LogCtx{logs, len};
+    AsyncWebServerResponse* response = request->beginResponse(
+        "text/plain", len,
+        [ctx](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+            if (index >= ctx->len) return 0;
+            size_t n = min(ctx->len - index, maxLen);
+            memcpy(buffer, ctx->buf + index, n);
+            return n;
+        });
+    response->addHeader("Cache-Control", "no-cache");
+    // Freed on disconnect, which fires whether or not the transfer completed.
+    request->onDisconnect([ctx]() {
+        free(ctx->buf);
+        delete ctx;
+    });
+    request->send(response);
 }
 
 // API: GET /log-viewer - HTML page with auto-refresh
 static void handleLogViewer(AsyncWebServerRequest* request) {
+    if (!requireAuth(request)) return;
     static const char LOG_VIEWER_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>CamS3 Log</title>
@@ -1290,8 +1415,7 @@ static void handleApiLensProfilesGet(AsyncWebServerRequest* request) {
 }
 
 static void handleApiLensProfilesPost(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-    if (!requireAuth(request)) return;
-    if (!requireCsrf(request)) return;
+    if (!bodyPreamble(request, index)) return;
     if (accumulateJsonBody(request, data, len, index, total) != 1) return;
     JsonDocument doc;
     if (deserializeJson(doc, (const uint8_t*)request->_tempObject, total) != DeserializationError::Ok) {
@@ -1353,11 +1477,13 @@ static void handleApiZonesGet(AsyncWebServerRequest* request) {
     request->send(200, "application/json", getZonesJSON());
 }
 
-static void handleApiZonesPost(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
-    if (!requireAuth(request)) return;
-    if (!requireCsrf(request)) return;
+static void handleApiZonesPost(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+    if (!bodyPreamble(request, index)) return;
+    // The handler runs once per TCP chunk; parsing a single chunk rejected (or
+    // truncated) any zone payload that did not fit one packet.
+    if (accumulateJsonBody(request, data, len, index, total) != 1) return;
     JsonDocument doc;
-    if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+    if (deserializeJson(doc, (const uint8_t*)request->_tempObject, total) != DeserializationError::Ok) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
     }
@@ -1380,6 +1506,7 @@ static void handleApiZonesPost(AsyncWebServerRequest* request, uint8_t* data, si
             ZoneRect& zr = z.rects[z.rect_count++];
             zr.x = r["x"] | 0; zr.y = r["y"] | 0;
             zr.w = r["w"] | 1; zr.h = r["h"] | 1;
+            clampZoneRect(zr);   // w/h come straight from the network; see zone_manager
         }
     }
     if (z.name[0] == '\0') {
@@ -1423,11 +1550,11 @@ static void handleApiRoiGet(AsyncWebServerRequest* request) {
     request->send(200, "application/json", out);
 }
 
-static void handleApiRoiPost(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t, size_t) {
-    if (!requireAuth(request)) return;
-    if (!requireCsrf(request)) return;
+static void handleApiRoiPost(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+    if (!bodyPreamble(request, index)) return;
+    if (accumulateJsonBody(request, data, len, index, total) != 1) return;
     JsonDocument doc;
-    if (deserializeJson(doc, data, len) != DeserializationError::Ok) {
+    if (deserializeJson(doc, (const uint8_t*)request->_tempObject, total) != DeserializationError::Ok) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return;
     }
     const char* mask = doc["mask"] | "";
@@ -1456,6 +1583,7 @@ static void handleApiRoiPost(AsyncWebServerRequest* request, uint8_t* data, size
 // ── Event log API ─────────────────────────────────────────────────────────────
 #ifdef INCLUDE_EVENT_LOG
 static void handleApiEvents(AsyncWebServerRequest* request) {
+    if (!requireAuth(request)) return;
     request->send(200, "application/json", getEventsJSON());
 }
 #endif
@@ -1543,10 +1671,14 @@ static void handleHealth(AsyncWebServerRequest* request) {
     // from a bare power-on without anyone asking for a reboot. A monitor combines
     // this with uptime to decide whether the problem is current or historical.
     const char* reasonName = resetReasonName(sysStats.last_reset_reason);
-    bool powerSuspect = sysStats.brownout_restarts > 0 ||
-                        sysStats.last_reset_reason == ESP_RST_BROWNOUT ||
+    // The brownout counter never resets, so counting it alone left A12 alerting
+    // forever after a single old event. Suspect = THIS boot followed a brownout/bare
+    // power-on, or a brownout was recorded and the device has not yet run 24 h clean.
+    const bool recentBoot = uptimeSec < 24UL * 3600UL;
+    bool powerSuspect = sysStats.last_reset_reason == ESP_RST_BROWNOUT ||
+                        (sysStats.brownout_restarts > 0 && recentBoot) ||
                         (sysStats.last_reset_reason == ESP_RST_POWERON &&
-                         sysStats.total_restarts > 1);
+                         sysStats.total_restarts > 1 && recentBoot);
 
     doc["reset_reason"] = reasonName;
     doc["last_restart_reason_name"] = reasonName;   // name A12 reads
@@ -1707,13 +1839,15 @@ static void handleIrStatus(AsyncWebServerRequest* request) {
     request->send(200, "application/json", "{\"ir_led_state\":false,\"auto_mode\":false,\"available\":false}");
 }
 
-static void handleIrControl(AsyncWebServerRequest* request, uint8_t*, size_t, size_t, size_t) {
+// Body-less handlers (the body is ignored): registered via onRequest so an empty POST
+// is answered too.
+static void handleIrControl(AsyncWebServerRequest* request) {
     if (!requireAuth(request)) return;
     if (!requireCsrf(request)) return;
     request->send(200, "application/json", "{\"success\":true,\"ir_led_state\":false,\"available\":false}");
 }
 
-static void handleRecordControl(AsyncWebServerRequest* request, uint8_t*, size_t, size_t, size_t) {
+static void handleRecordControl(AsyncWebServerRequest* request) {
     if (!requireAuth(request)) return;
     if (!requireCsrf(request)) return;
     request->send(501, "application/json", "{\"success\":false,\"message\":\"AVI recording is not enabled on CamS3 yet\"}");
@@ -1748,12 +1882,23 @@ static void handleSaveFrame(AsyncWebServerRequest* request) {
     size_t len = 0;
     int rh = ringBufferGetLatest(&buf, &len);
     if (rh < 0 || !buf || len == 0) {
+        if (rh >= 0) ringBufferRelease(rh);
         request->send(503, "application/json", "{\"status\":\"error\",\"message\":\"no_frame\"}");
         return;
     }
-    char filename[128];
-    bool ok = sdStoreWriteJpeg("/captures", "manual_", buf, len, filename, sizeof(filename));
+    // Copy the frame to PSRAM and give the slot back at once: holding a ring slot
+    // across slow SD I/O starved the capture task (ring has only a few slots).
+    uint8_t* copy = (uint8_t*)ps_malloc(len);
+    if (!copy) {
+        ringBufferRelease(rh);
+        request->send(503, "application/json", "{\"status\":\"error\",\"message\":\"no_memory\"}");
+        return;
+    }
+    memcpy(copy, buf, len);
     ringBufferRelease(rh);
+    char filename[128];
+    bool ok = sdStoreWriteJpeg("/captures", "manual_", copy, len, filename, sizeof(filename));
+    free(copy);
     if (!ok) {
         request->send(500, "application/json", "{\"status\":\"error\",\"message\":\"write_failed\"}");
         return;
@@ -1764,11 +1909,9 @@ static void handleSaveFrame(AsyncWebServerRequest* request) {
 #endif
 
 static void setupApiRoutes() {
-    // CORS headers for all
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
+    // No CORS headers on purpose: "Allow-Origin: *" let any web page open in a
+    // browser on the LAN read /frame, logs and events cross-origin. The UI is served
+    // same-origin; A12 and scripts are not browsers and do not need CORS.
     server.on("/api/status", HTTP_GET, handleApiStatus);
     server.on("/api/sensor", HTTP_GET, handleApiSensor);
     server.on("/api/focus", HTTP_GET, handleApiFocus);
@@ -1794,14 +1937,14 @@ static void setupApiRoutes() {
 
     // Settings (POST with JSON body)
     server.on("/api/settings", HTTP_POST,
-        [](AsyncWebServerRequest* request) {},
+        emptyBodyReply,
         NULL,
         handleApiSettings
     );
 
     // WiFi connect (POST with JSON body)
     server.on("/api/wifi", HTTP_POST,
-        [](AsyncWebServerRequest* request) {},
+        emptyBodyReply,
         NULL,
         handleApiWifi
     );
@@ -1810,7 +1953,7 @@ static void setupApiRoutes() {
     server.on("/status", HTTP_GET, handleApiStatus);
     server.on("/settings", HTTP_GET, handleApiStatus);
     server.on("/settings", HTTP_POST,
-        [](AsyncWebServerRequest* request) {},
+        emptyBodyReply,
         NULL,
         handleApiSettings
     );
@@ -1830,16 +1973,8 @@ static void setupApiRoutes() {
     server.on("/psram-stats", HTTP_GET, handlePsramStats);
     server.on("/audio-status", HTTP_GET, handleAudioStatus);
     server.on("/ir-status", HTTP_GET, handleIrStatus);
-    server.on("/ir-control", HTTP_POST,
-        [](AsyncWebServerRequest* request) {},
-        NULL,
-        handleIrControl
-    );
-    server.on("/record", HTTP_POST,
-        [](AsyncWebServerRequest* request) {},
-        NULL,
-        handleRecordControl
-    );
+    server.on("/ir-control", HTTP_POST, handleIrControl);
+    server.on("/record", HTTP_POST, handleRecordControl);
     server.on("/credentials", HTTP_GET, handleCredentialsGet);
 
     // Motion detection API
@@ -1855,21 +1990,21 @@ static void setupApiRoutes() {
 
     server.on("/api/lens-profiles", HTTP_GET, handleApiLensProfilesGet);
     server.on("/api/lens-profiles", HTTP_POST,
-        [](AsyncWebServerRequest* r) {}, NULL, handleApiLensProfilesPost);
+        emptyBodyReply, NULL, handleApiLensProfilesPost);
     #ifdef INCLUDE_ZONES
     server.on("/zones", HTTP_GET, handleApiZonesGet);            // DFR1154 names; delete = POST {"delete":name}
     server.on("/zones", HTTP_POST,
-        [](AsyncWebServerRequest* request) {}, NULL, handleApiZonesPost);
+        emptyBodyReply, NULL, handleApiZonesPost);
     server.on("/roi-mask", HTTP_GET, handleApiRoiGet);
     server.on("/roi-mask", HTTP_POST,
-        [](AsyncWebServerRequest* r) {}, NULL, handleApiRoiPost);
+        emptyBodyReply, NULL, handleApiRoiPost);
     server.on("/api/zones", HTTP_GET, handleApiZonesGet);
     server.on("/api/zones", HTTP_POST,
-        [](AsyncWebServerRequest* r) {}, NULL, handleApiZonesPost);
+        emptyBodyReply, NULL, handleApiZonesPost);
     server.on("/api/zones", HTTP_DELETE, handleApiZonesDelete);
     server.on("/api/roi", HTTP_GET, handleApiRoiGet);
     server.on("/api/roi", HTTP_POST,
-        [](AsyncWebServerRequest* r) {}, NULL, handleApiRoiPost);
+        emptyBodyReply, NULL, handleApiRoiPost);
     #endif
 
     #ifdef INCLUDE_EVENT_LOG
@@ -1933,9 +2068,7 @@ void webServerInit() {
 
     #ifdef INCLUDE_OTA
     ElegantOTA.begin(&server);
-    if (appConfig.auth.http_user.length() > 0 && appConfig.auth.http_pass.length() > 0) {
-        ElegantOTA.setAuth(appConfig.auth.http_user.c_str(), appConfig.auth.http_pass.c_str());
-    }
+    applyOtaAuth();
     ElegantOTA.onEnd([](bool success) {
         if (success) logNewFirmwareSha();
         else logCapture("[%s] OTA failed\n", TAG);

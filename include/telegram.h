@@ -10,8 +10,10 @@ void telegramInit();
 void telegramTask(void* param);
 
 // Non-blocking send functions (enqueue to task)
-void telegramSendText(const char* msg);
-void telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption);
+// Return true when the message was enqueued, false when it was dropped
+// (disabled, cooldown, queue full, allocation failure).
+bool telegramSendText(const char* msg);
+bool telegramSendPhoto(const uint8_t* jpeg, size_t len, const char* caption);
 
 // Check if Telegram is configured (token + chat_id set)
 bool isTelegramConnected();

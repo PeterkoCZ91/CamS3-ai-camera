@@ -41,10 +41,21 @@
     }
 
     // Drop-in fetch replacement: attaches X-CSRF-Token on mutating calls,
-    // retries once if the server replies 403 csrf_required (token rotated).
+    // retries once if the server replies 403 with a "CSRF token ..." error (token rotated).
     function apiFetch(url, opts) {
         opts = opts || {};
         opts.credentials = opts.credentials || 'same-origin';
+        return apiFetchInner(url, opts).then(resp => {
+            // Credentials rejected (changed password, expired session): say so
+            // instead of letting callers show a generic "offline"/parse error.
+            if (resp.status === 401) {
+                try { showToast(T('common.unauthorized'), 'error', 5000); } catch (e) { /* ignore */ }
+            }
+            return resp;
+        });
+    }
+
+    function apiFetchInner(url, opts) {
         if (!needsCsrf(opts.method)) return fetch(url, opts);
 
         return fetchCsrf().then(token => {
@@ -53,13 +64,18 @@
             return fetch(url, Object.assign({}, opts, { headers }));
         }).then(resp => {
             if (resp.status !== 403) return resp;
-            // Token likely rotated (reboot / restart). Refresh and retry once.
-            csrfToken = null;
-            return fetchCsrf().then(token => {
-                const headers = new Headers(opts.headers || {});
-                headers.set('X-CSRF-Token', token);
-                return fetch(url, Object.assign({}, opts, { headers }));
-            });
+            // Only a CSRF rejection ("CSRF token missing|invalid") means the token
+            // rotated; any other 403 must be returned untouched, not replayed.
+            return resp.clone().json().then(j => !!(j && /^CSRF token/.test(String(j.error || ''))), () => false)
+                .then(isCsrf => {
+                    if (!isCsrf) return resp;
+                    csrfToken = null;
+                    return fetchCsrf().then(token => {
+                        const headers = new Headers(opts.headers || {});
+                        headers.set('X-CSRF-Token', token);
+                        return fetch(url, Object.assign({}, opts, { headers }));
+                    });
+                });
         });
     }
 
@@ -95,8 +111,10 @@
             (document.body || document.documentElement).appendChild(t);
         }
         // Screen readers announce the text because the node is a live region.
-        t.setAttribute('role', 'status');
-        t.setAttribute('aria-live', 'polite');
+        // Errors interrupt (role=alert); everything else is polite.
+        const isErr = type === 'error';
+        t.setAttribute('role', isErr ? 'alert' : 'status');
+        t.setAttribute('aria-live', isErr ? 'assertive' : 'polite');
         t.textContent = text;
         t.className = 'toast ' + (type || 'info') + ' show';
         if (toastTimer) clearTimeout(toastTimer);

@@ -56,7 +56,14 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 
     esp_err_t res = ESP_OK;
     char part_buf[160];
+    char fpsHdr[16];   // must outlive the response: httpd keeps the pointer, not a copy
+    snprintf(fpsHdr, sizeof(fpsHdr), "%d", (int)appConfig.active_fps);
     uint32_t lastSentTimestamp = 0;
+    // Per-connection PSRAM copy of the frame, allocated once and grown on demand, so the
+    // ring slot is released BEFORE the (up to 3 s) blocking send. NULL = alloc failed,
+    // fall back to sending straight from the slot.
+    uint8_t* frameCopy = NULL;
+    size_t   frameCap  = 0;
 
     // Set socket send timeout so stale A12/GUI clients do not hold the task forever.
     int fd = httpd_req_to_sockfd(req);
@@ -67,7 +74,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     if (res != ESP_OK) return res;
 
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "X-Framerate", String(appConfig.active_fps).c_str());
+    httpd_resp_set_hdr(req, "X-Framerate", fpsHdr);
     httpd_resp_set_hdr(req, "X-Stream-Role", cfg->role);
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
 
@@ -109,9 +116,23 @@ static esp_err_t streamHandler(httpd_req_t* req) {
         uint32_t now = millis();
         uint32_t age = (ts > 0 && now >= ts) ? (now - ts) : 0;
 
+        // Copy out and release the slot so a slow client cannot starve the capture task.
+        bool slotHeld = true;
+        const uint8_t* sendBuf = buf;
+        if (len > frameCap) {
+            uint8_t* nb = (uint8_t*)heap_caps_realloc(frameCopy, len, MALLOC_CAP_SPIRAM);
+            if (nb) { frameCopy = nb; frameCap = len; }
+        }
+        if (frameCopy && len <= frameCap) {
+            memcpy(frameCopy, buf, len);
+            ringBufferRelease(rh);
+            slotHeld = false;
+            sendBuf = frameCopy;
+        }
+
         res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
         if (res != ESP_OK) {
-            ringBufferRelease(rh);
+            if (slotHeld) ringBufferRelease(rh);
             break;
         }
 
@@ -121,17 +142,18 @@ static esp_err_t streamHandler(httpd_req_t* req) {
                                (unsigned long)age);
         res = httpd_resp_send_chunk(req, part_buf, hlen);
         if (res != ESP_OK) {
-            ringBufferRelease(rh);
+            if (slotHeld) ringBufferRelease(rh);
             break;
         }
 
-        res = httpd_resp_send_chunk(req, (const char*)buf, len);
-        ringBufferRelease(rh);
+        res = httpd_resp_send_chunk(req, (const char*)sendBuf, len);
+        if (slotHeld) ringBufferRelease(rh);
 
         if (res != ESP_OK) break;
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
+    if (frameCopy) heap_caps_free(frameCopy);
     routeClientDisconnected(cfg);
     logCapture("[%s] %s stream client disconnected\n", TAG, cfg->role);
     return res;
@@ -160,7 +182,11 @@ static esp_err_t snapshotHandler(httpd_req_t* req) {
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=snapshot.jpg");
         httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-        if (ts > 0) httpd_resp_set_hdr(req, "X-Timestamp", String(ts).c_str());
+        char tsHdr[16];
+        if (ts > 0) {
+            snprintf(tsHdr, sizeof(tsHdr), "%lu", (unsigned long)ts);
+            httpd_resp_set_hdr(req, "X-Timestamp", tsHdr);
+        }
         esp_err_t res = httpd_resp_send(req, (const char*)copy, len);
         free(copy);
         return res;
@@ -193,9 +219,11 @@ static esp_err_t corsHandler(httpd_req_t* req) {
 static esp_err_t streamHeadHandler(httpd_req_t* req) {
     StreamRouteConfig* cfg = (StreamRouteConfig*)req->user_ctx;
     if (!cfg) cfg = &guiStreamConfig;
+    char fpsHdr[16];
+    snprintf(fpsHdr, sizeof(fpsHdr), "%d", (int)appConfig.active_fps);
     httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "X-Framerate", String(appConfig.active_fps).c_str());
+    httpd_resp_set_hdr(req, "X-Framerate", fpsHdr);
     httpd_resp_set_hdr(req, "X-Stream-Role", cfg->role);
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;

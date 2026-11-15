@@ -22,6 +22,8 @@ public:
     uint32_t getTotalBytes()  const { return _totalDataBytes; }
 
 private:
+    // Borrowed pointer: the File passed to begin() must outlive this writer
+    // (until end() returns). end() clears it.
     File*    _file = nullptr;
     uint16_t _width = 0;
     uint16_t _height = 0;
@@ -31,7 +33,7 @@ private:
     uint32_t _moviStart = 0;
 
     bool writeChunk(const char fourcc[4], const uint8_t* data, size_t len);
-    void writePadByte(size_t len);
+    bool writePadByte(size_t len);
 };
 
 #endif // AVI_WRITER_H

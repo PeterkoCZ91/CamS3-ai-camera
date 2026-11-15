@@ -78,6 +78,11 @@ char* logGetAll() {
         }
         result[pos] = '\0';
         xSemaphoreGive(logMutex);
+    } else {
+        // Timeout used to return an empty buffer as if it were a successful read;
+        // NULL lets the caller report "busy" instead of a blank log.
+        free(result);
+        return NULL;
     }
 
     return result;

@@ -184,6 +184,7 @@ static String encGetSecret(Preferences& p, const char* key, const char* defaultV
 }
 
 void saveSecretsToNVS();
+bool saveSecretsToNVSChecked();
 
 static void loadSecretsFromNVS() {
     CfgLock lock;
@@ -221,6 +222,86 @@ static bool readConfigFile(const char* path, JsonDocument& doc) {
     return true;
 }
 
+// ---- sanitizeConfig ---------------------------------------------------------
+static int sClampI(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+// `!(v >= lo)` also catches NaN, which plain comparisons let through.
+static float sClampF(float v, float lo, float hi) {
+    if (!(v >= lo)) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+// Hostname: DNS label subset. Topic prefix: also allows '_' and '/' (existing
+// installs use them) but never MQTT wildcards or spaces.
+static bool validName(const String& s, bool topic) {
+    if (s.length() < 1 || s.length() > 32) return false;
+    for (size_t i = 0; i < s.length(); i++) {
+        char c = s[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        if (topic) ok = ok || (c >= 'A' && c <= 'Z') || c == '_' || c == '/';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+void sanitizeConfig() {
+    CfgLock lock;
+    AppConfig& c = appConfig;
+    c.camera.frame_size   = sClampI(c.camera.frame_size, FRAMESIZE_QVGA, FRAMESIZE_UXGA);
+    c.camera.jpeg_quality = sClampI(c.camera.jpeg_quality, 4, 63);
+    c.camera.brightness   = sClampI(c.camera.brightness, -2, 2);
+    c.camera.contrast     = sClampI(c.camera.contrast, -2, 2);
+    c.camera.saturation   = sClampI(c.camera.saturation, -2, 2);
+    c.camera.sharpness    = sClampI(c.camera.sharpness, -3, 3);
+    c.camera.denoise      = sClampI(c.camera.denoise, 0, 8);
+    c.camera.ae_level     = sClampI(c.camera.ae_level, -2, 2);
+    c.camera.aec_value    = sClampI(c.camera.aec_value, 0, 1200);
+    c.camera.agc_gain     = sClampI(c.camera.agc_gain, 0, 30);
+    c.camera.gainceiling  = sClampI(c.camera.gainceiling, 0, 6);
+    c.camera.wb_mode      = sClampI(c.camera.wb_mode, 0, 4);
+
+    c.motion.threshold       = sClampI(c.motion.threshold, 5, 80);
+    c.motion.cooldown_sec    = sClampI(c.motion.cooldown_sec, 0, 86400);
+    c.motion.min_area_pct    = sClampI(c.motion.min_area_pct, 1, 100);
+    c.motion.max_area_pct    = sClampI(c.motion.max_area_pct, 10, 100);
+    c.motion.ema_alpha_day   = sClampF(c.motion.ema_alpha_day, 0.50f, 0.999f);
+    c.motion.ema_alpha_night = sClampF(c.motion.ema_alpha_night, 0.50f, 0.999f);
+    c.motion.training_frames = sClampI(c.motion.training_frames, 1, 120);
+    c.motion.agc_gain_factor = sClampF(c.motion.agc_gain_factor, 0.0f, 4.0f);
+    c.motion.brightness_min  = sClampI(c.motion.brightness_min, 0, 128);
+
+    c.face_detect.score_threshold = sClampF(c.face_detect.score_threshold, 0.05f, 0.99f);
+    c.face_detect.nms_threshold   = sClampF(c.face_detect.nms_threshold, 0.05f, 0.99f);
+    c.face_detect.cooldown_sec    = sClampI(c.face_detect.cooldown_sec, 0, 86400);
+
+    c.person_detect.confidence_threshold = sClampF(c.person_detect.confidence_threshold, 0.05f, 0.99f);
+    c.person_detect.confident_threshold  = sClampF(c.person_detect.confident_threshold, 0.05f, 1.0f);
+    c.person_detect.temporal_frames      = sClampI(c.person_detect.temporal_frames, 1, 10);
+    c.person_detect.cooldown_sec         = sClampI(c.person_detect.cooldown_sec, 0, 86400);
+
+    c.tracker.confirm_hits = sClampI(c.tracker.confirm_hits, 1, 10);
+    c.tracker.max_misses   = sClampI(c.tracker.max_misses, 1, 30);
+    c.tracker.match_dist   = sClampI(c.tracker.match_dist, 1, 500);
+
+    c.timelapse.interval_sec = sClampI(c.timelapse.interval_sec, 1, 86400);
+    c.mqtt.port = sClampI(c.mqtt.port, 1, 65535);
+
+    c.telegram.cooldown_sec      = sClampI(c.telegram.cooldown_sec, 0, 86400);
+    c.telegram.active_start_hour = sClampI(c.telegram.active_start_hour, 0, 23);
+    c.telegram.active_end_hour   = sClampI(c.telegram.active_end_hour, 0, 23);
+    c.telegram.poll_interval_ms  = sClampI(c.telegram.poll_interval_ms, 1000, 15000);
+
+    c.idle_fps   = sClampI(c.idle_fps, 1, 30);
+    c.active_fps = sClampI(c.active_fps, 1, 30);
+    c.lens_fov_deg     = sClampI(c.lens_fov_deg, 0, 220);
+    c.lens_ref_fov_deg = sClampI(c.lens_ref_fov_deg, 0, 220);
+
+    c.wifi.hostname.toLowerCase();
+    if (!validName(c.wifi.hostname, false)) c.wifi.hostname = "cams3";
+    if (!validName(c.mqtt.topic_prefix, true)) c.mqtt.topic_prefix = "cams3";
+    if (c.auth.http_user.length() == 0) c.auth.http_user = DEFAULT_HTTP_USER;
+}
+
 bool loadConfig() {
     CfgLock lock;
     // Always load secrets from NVS first — independent of LittleFS health.
@@ -238,6 +319,7 @@ bool loadConfig() {
 
     if (!LittleFS.exists(CONFIG_FILE) && !LittleFS.exists(CONFIG_FILE_BAK)) {
         logCapture("[%s] No config file, using defaults (secrets already loaded from NVS)\n", TAG);
+        sanitizeConfig();
         return false;
     }
 
@@ -385,6 +467,8 @@ bool loadConfig() {
     // csrf_required defaults to TRUE to match AuthSettings — the previous `| false`
     // silently disabled CSRF for every device that had ever saved a config.
     appConfig.auth.http_user     = doc["auth"]["user"]           | String(DEFAULT_HTTP_USER);
+    // An empty user in config.json used to disable authentication entirely.
+    if (appConfig.auth.http_user.length() == 0) appConfig.auth.http_user = DEFAULT_HTTP_USER;
     appConfig.auth.csrf_required = doc["auth"]["csrf_required"]  | true;
 
     // Misc
@@ -395,6 +479,10 @@ bool loadConfig() {
     appConfig.active_fps  = doc["active_fps"]  | 15;
 
     // NVS secrets already loaded above — don't duplicate.
+
+    // config.json is untrusted input (corruption, hand edits, older builds): clamp
+    // before anyone uses it. A poll interval of 0 or >20 s used to boot-loop the device.
+    sanitizeConfig();
 
     logCapture("[%s] Config loaded (v%d)\n", TAG, appConfig.version);
     return true;
@@ -571,11 +659,12 @@ static bool secretUnchanged(Preferences& p, const char* key, const String& want)
     return cur == want;
 }
 
-void saveSecretsToNVS() {
+bool saveSecretsToNVSChecked() {
     CfgLock lock;
+    bool allOk = true;
     if (!nvs.begin("cams3", false)) {
         logCapture("[%s] ERROR: cannot open NVS for secrets, nothing saved\n", TAG);
-        return;
+        return false;
     }
     struct { const char* key; const String* val; } items[] = {
         {"wifi_ssid", &appConfig.wifi.ssid}, {"wifi_pass", &appConfig.wifi.password},
@@ -590,10 +679,14 @@ void saveSecretsToNVS() {
         if (it.val->length() > 0 && nvs.isKey(it.key) && nvs.getBytesLength(it.key) == 0) nvs.remove(it.key);
         if (!encPutSecret(nvs, it.key, *it.val)) {
             logCapture("[%s] ERROR: failed to store secret '%s' in NVS\n", TAG, it.key);
+            allOk = false;
         }
     }
     nvs.end();
+    return allOk;
 }
+
+void saveSecretsToNVS() { (void)saveSecretsToNVSChecked(); }
 
 void resetConfig() {
     CfgLock lock;

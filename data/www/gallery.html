@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Gallery - CamS3</title>
+    <title data-i18n="title.gallery">Gallery - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
     <script src="/common.js"></script>
@@ -168,7 +168,7 @@
         container.appendChild(wait);
         document.getElementById('pager').style.display = 'none';
 
-        fetch('/api/sd/list?path=' + encodeURIComponent(path), { credentials: 'same-origin' })
+        apiFetch('/api/sd/list?path=' + encodeURIComponent(path))
             .then(r => {
                 if (!r.ok) throw new Error(T('gallery.unavailable') + ' (HTTP ' + r.status + ')');
                 return r.json();

@@ -19,6 +19,7 @@ struct Zone {
 
 void    initZoneManager();
 bool    saveZones();
+void    clampZoneRect(ZoneRect& r);   // clamp to the motion grid (shared with POST /zones)
 
 int     getZoneCount();
 Zone*   getZone(int index);

@@ -157,7 +157,8 @@ detector's buffer. The limitation is throughput, not memory safety.
 * **`/ws` on port 80**: broadcasts a complete `/api/status` document every 2 seconds
   to any client that connects.
 * **A long list of read-only endpoints on port 80**, including `/api/status`,
-  `/api/snapshot`, `/log`, `/api/events` and `/api/wifi/scan`.
+  `/api/snapshot` and `/frame`. (`/log`, `/api/events` and `/api/wifi/scan` need
+  Basic Auth since the 2026-11 review.)
 
 `docs/API.md` §8 enumerates exactly what that leaks (live video, MAC, SSID list,
 crash history, MQTT broker address and username, event log, serial log) and what it
@@ -435,21 +436,15 @@ coredumps and `/api/status` reports `coredump_present` and `coredump_size`, but
 getting the dump out requires `esp-coredump` over a serial connection. There is no
 download endpoint.
 
-**Several settings keys are not range-checked.** `telegram_cooldown`,
-`telegram_active_start`, `telegram_active_end`, `motion_notify_start_hour`,
-`motion_notify_end_hour`, `telegram_poll_interval`, `idle_fps` and `active_fps` are
-stored verbatim from the JSON body with no `clampInt()`. Everything else in
-`POST /api/settings` is clamped. An hour of `99` or an `active_fps` of `10000` will
-be accepted and persisted.
+**All numeric settings are range-checked** by `sanitizeConfig()`, both when
+`POST /api/settings` applies them and when `config.json` is loaded, so a hand-edited or
+older file cannot persist an out-of-range value (a `telegram_poll_interval` above the
+task watchdog limit used to boot-loop the device).
 
-**`http_pass` shorter than 4 characters is silently ignored**, not rejected: the
-request still returns `{"success":true}` and the password is unchanged. Same for an
-over-long `http_user` or `hostname`.
-
-**`POST /api/zones` and `POST /api/roi` parse only the first body chunk.** They
-ignore the `index`/`total` parameters that `POST /api/settings` uses for
-reassembly. Their payloads fit in one TCP segment in practice (a zone object is a few
-hundred bytes; an ROI mask is 300 characters), but a larger body fails to parse.
+**`http_pass` shorter than 4 characters is ignored**, not rejected: the
+request still returns `{"success":true}` and the password is unchanged, but the key is
+now listed in the `ignored` array. Same for an over-long `http_user` or an invalid
+`hostname` (`[a-z0-9-]`, 1-32 characters).
 
 **Zones are capped at 8, with 4 rectangles each.** Rectangles beyond the fourth are
 **silently dropped**, not rejected. Zone names are the primary key and are truncated

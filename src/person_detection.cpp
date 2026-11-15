@@ -115,6 +115,28 @@ static portMUX_TYPE pdMux = portMUX_INITIALIZER_UNLOCKED;
 // Temporal filter
 static int consecutiveDetections = 0;
 static unsigned long lastUncertainPublishTime = 0;
+// After a motion cascade signal keep inferring for this long, so the tracker gets
+// enough consecutive frames to reach confirm_hits. The semaphore is binary and
+// motion fires it once per event, which used to give exactly one frame per event.
+#define PD_BURST_MS  8000
+static unsigned long burstUntil = 0;
+static bool burstArmed = false;
+// True once trackerUpdate() has run since the last trackerReset().
+static bool trackerDirty = false;
+
+#ifdef INCLUDE_TELEGRAM
+// PSRAM copy of the JPEG for the Telegram photo (allocated once, held), so the
+// ring slot is not held while telegramSendPhoto may do slow SD I/O.
+static uint8_t* jpegCopy = NULL;
+#endif
+
+// Drop tracker + temporal state, e.g. when the detector goes idle or is disabled:
+// stale tentative tracks must not combine with detections from a later event.
+static void resetTrackingState() {
+    if (trackerDirty) trackerReset();
+    trackerDirty = false;
+    consecutiveDetections = 0;
+}
 // Timestamp of the last notification we actually sent (photo or text).
 static volatile unsigned long lastPersonNotifyTime = 0;
 
@@ -239,35 +261,50 @@ void personDetectTask(void* param) {
         esp_task_wdt_reset();
         if (!appConfig.person_detect.enabled || !decodeBuffer || !grayBuffer || !fomoInput) {
             personDetected = false;
+            burstArmed = false;
+            resetTrackingState();
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        // Wait for motion semaphore (cascade from motion task)
-        if (motionSem) {
-            if (xSemaphoreTake(motionSem, pdMS_TO_TICKS(2000)) != pdTRUE) {
-                // Timeout — no motion, clear state
-                if (personDetected && (millis() - lastPersonTime > 5000)) {
-                    personDetected = false;
+        // Keep inferring while motion is ongoing or the post-signal burst window
+        // is open; only block on the semaphore when idle.
+        bool active = burstArmed && (long)(burstUntil - millis()) > 0;
+        #ifdef INCLUDE_MOTION_DETECT
+        if (isMotionDetected()) active = true;
+        #endif
+        if (motionSem && xSemaphoreTake(motionSem, 0) == pdTRUE) {
+            // A fresh motion event (also drains a signal given during a burst so
+            // it cannot start a phantom burst later).
+            burstUntil = millis() + PD_BURST_MS;
+            burstArmed = true;
+            active = true;
+        }
+        if (!active) {
+            burstArmed = false;
+            resetTrackingState();
+            if (motionSem) {
+                if (xSemaphoreTake(motionSem, pdMS_TO_TICKS(2000)) != pdTRUE) {
+                    // Timeout — no motion, clear state
+                    if (personDetected && (millis() - lastPersonTime > 5000)) {
+                        personDetected = false;
+                    }
+                    continue;
                 }
-                continue;
-            }
-        } else {
-            // Fallback: poll isMotionDetected()
-            #ifdef INCLUDE_MOTION_DETECT
-            if (!isMotionDetected()) {
+                burstUntil = millis() + PD_BURST_MS;
+                burstArmed = true;
+            } else {
+                // No semaphore wired: nothing to wait on, poll again shortly.
                 vTaskDelay(pdMS_TO_TICKS(500));
                 continue;
             }
-            #else
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-            #endif
         }
 
         // Cooldown check
         if (lastPersonTime > 0) {
-            unsigned long cooldownMs = appConfig.person_detect.cooldown_sec * 1000UL;
+            int cooldownSec = appConfig.person_detect.cooldown_sec;
+            if (cooldownSec < 0) cooldownSec = 0;
+            unsigned long cooldownMs = (unsigned long)cooldownSec * 1000UL;
             if (millis() - lastPersonTime < cooldownMs) {
                 vTaskDelay(pdMS_TO_TICKS(200));
                 continue;
@@ -346,8 +383,10 @@ void personDetectTask(void* param) {
 
         for (size_t i = 0; i < result.bounding_boxes_count && numDets < TRACKER_MAX_DETECTIONS; i++) {
             ei_impulse_result_bounding_box_t& bb = result.bounding_boxes[i];
-            if (bb.value > topScore) topScore = bb.value;
             if (bb.value < appConfig.person_detect.confidence_threshold) continue;
+            // topScore only from boxes that pass the threshold, so a sub-threshold
+            // box cannot inflate the score of a confirmed track.
+            if (bb.value > topScore) topScore = bb.value;
             dets[numDets].x = bb.x + bb.width / 2;
             dets[numDets].y = bb.y + bb.height / 2;
             dets[numDets].w = bb.width;
@@ -365,12 +404,15 @@ void personDetectTask(void* param) {
 
         // Step 5: Update tracker
         int confirmedCount = trackerUpdate(dets, numDets);
+        trackerDirty = true;
 
         // Step 6: Temporal filter
         bool confirmed = false;
         if (confirmedCount > 0) {
             consecutiveDetections++;
-            if (consecutiveDetections >= appConfig.person_detect.temporal_frames) {
+            int temporalFrames = appConfig.person_detect.temporal_frames;
+            if (temporalFrames < 1) temporalFrames = 1;
+            if (consecutiveDetections >= temporalFrames) {
                 confirmed = true;
             }
         } else {
@@ -413,24 +455,40 @@ void personDetectTask(void* param) {
                              czPlural(confirmedCount, "osoba", "osoby", "osob"),
                              topScore * 100.0f);
 
+                    // Only count the notification as delivered when Telegram actually
+                    // accepted it (its cooldown can drop a send); otherwise the track
+                    // stays un-notified and is retried instead of being lost.
+                    bool sent = false;
                     if (appConfig.telegram.photo_on_person) {
-                        const uint8_t* tgBuf = NULL;
                         size_t tgLen = 0;
-                        int th = ringBufferGetLatest(&tgBuf, &tgLen);
-                        if (th >= 0) {
-                            telegramSendPhoto(tgBuf, tgLen, caption);
-                            ringBufferRelease(th);
+                        if (!jpegCopy) jpegCopy = (uint8_t*)ps_malloc(IMG_JPEG_COPY_MAX);
+                        if (jpegCopy) {
+                            const uint8_t* tgBuf = NULL;
+                            size_t l = 0;
+                            int th = ringBufferGetLatest(&tgBuf, &l);
+                            if (th >= 0) {
+                                if (l > 0 && l <= IMG_JPEG_COPY_MAX) {
+                                    memcpy(jpegCopy, tgBuf, l);
+                                    tgLen = l;
+                                }
+                                ringBufferRelease(th);
+                            }
+                        }
+                        if (tgLen > 0) {
+                            sent = telegramSendPhoto(jpegCopy, tgLen, caption);
                         }
                     } else {
-                        telegramSendText(caption);
+                        sent = telegramSendText(caption);
                     }
 
-                    // Tell motion detection a person notification went out, so its
-                    // fallback does not follow up with a duplicate photo.
-                    lastPersonNotifyTime = millis();
+                    if (sent) {
+                        // Tell motion detection a person notification went out, so
+                        // its fallback does not follow up with a duplicate photo.
+                        lastPersonNotifyTime = millis();
 
-                    for (int i = 0; i < newCount; i++) {
-                        trackerMarkNotified(newTracks[i]->id);
+                        for (int i = 0; i < newCount; i++) {
+                            trackerMarkNotified(newTracks[i]->id);
+                        }
                     }
                 }
             }

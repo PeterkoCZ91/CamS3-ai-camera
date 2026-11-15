@@ -23,7 +23,7 @@
 #define MAX_STREAM_CLIENTS 3
 
 // Capture task
-#define CAPTURE_TASK_STACK   4096
+#define CAPTURE_TASK_STACK   6144
 #define CAPTURE_TASK_PRIO    6
 #define STREAM_TASK_PRIO     5
 
@@ -171,7 +171,9 @@ struct TrackerSettings {
 #define TELEGRAM_COOLDOWN_DEFAULT   30
 #define TELEGRAM_ACTIVE_START_DEFAULT 0
 #define TELEGRAM_ACTIVE_END_DEFAULT   23
-#define TELEGRAM_POLL_INTERVAL_MS_DEFAULT 30000
+// Capped at 15 s: the Telegram task's long poll must finish well inside the task WDT
+// (a 30 s default combined with a >20 s configured value panicked into a boot loop).
+#define TELEGRAM_POLL_INTERVAL_MS_DEFAULT 15000
 
 struct TelegramSettings {
     bool enabled             = false;
@@ -221,6 +223,15 @@ extern AppConfig appConfig;
 bool loadConfig();
 bool saveConfig();
 void resetConfig();
+
+// Clamp every numeric / name field of appConfig into its valid range. Single source
+// of truth shared by the loader (config.json is untrusted after a corrupt write or
+// hand edit) and POST /api/settings, so the two can never disagree about limits.
+void sanitizeConfig();
+
+// Persist secrets to NVS. Same as saveSecretsToNVS() (kept void for existing callers)
+// but reports failure so the API does not claim success for a write that did not land.
+bool saveSecretsToNVSChecked();
 
 // Push appConfig.camera to the sensor over SCCB (I2C).
 // MUST be called from the capture task (or before it starts) — the sensor bus is

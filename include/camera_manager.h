@@ -16,7 +16,8 @@ void releaseFrame(camera_fb_t* fb);
 
 // Capture task management. stopCaptureTask() blocks until the task has exited
 // (up to 3s) and returns false if it never did.
-void startCaptureTask();
+// Returns false if the task could not be started (create failed, or an old one is still alive).
+bool startCaptureTask();
 bool stopCaptureTask();
 
 // Ring buffer access for streaming

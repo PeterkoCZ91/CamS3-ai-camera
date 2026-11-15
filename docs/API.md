@@ -27,10 +27,9 @@ The split is deliberate: an MJPEG handler blocks its socket for as long as the
 client is connected, so it lives on a separate server with its own task and client
 budget instead of starving the async server that serves the UI.
 
-Both ports send `Access-Control-Allow-Origin: *`. Port 80 additionally sets
-`Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS` and
-`Access-Control-Allow-Headers: Content-Type, Authorization` as default headers on
-every response.
+Port 81 (the streams) sends `Access-Control-Allow-Origin: *`. Port 80 sends **no**
+CORS headers: the UI is same-origin and A12 is server-side, so a page on another
+origin cannot read the camera's API responses from a browser.
 
 Handler count: **51 on port 80** (44 API/compat routes + 3 captive-portal redirects
 + 3 OTA routes + 1 WebSocket, plus a static-file mount and a 404 fallback) and
@@ -385,12 +384,12 @@ they are stored and reported but nothing consumes them.
 | `telegram_photo_on_face` | bool | – | |
 | `telegram_photo_on_person` | bool | – | |
 | `person_telegram_photo` | bool | – | Legacy alias of `telegram_photo_on_person` |
-| `telegram_cooldown` | int | **not clamped** | Seconds |
-| `telegram_active_start` | int | **not clamped** | Hour 0–23 by convention; overnight wrap supported |
-| `telegram_active_end` | int | **not clamped** | Hour 0–23 by convention |
-| `motion_notify_start_hour` | int | **not clamped** | Legacy alias of `telegram_active_start` |
-| `motion_notify_end_hour` | int | **not clamped** | Legacy alias of `telegram_active_end` |
-| `telegram_poll_interval` | int | **not clamped** | Milliseconds between `getUpdates` polls |
+| `telegram_cooldown` | int | 0 … 86400 | Seconds |
+| `telegram_active_start` | int | 0 … 23 | Overnight wrap supported |
+| `telegram_active_end` | int | 0 … 23 | |
+| `motion_notify_start_hour` | int | 0 … 23 | Legacy alias of `telegram_active_start` |
+| `motion_notify_end_hour` | int | 0 … 23 | Legacy alias of `telegram_active_end` |
+| `telegram_poll_interval` | int | 1000 … 15000 | Milliseconds between `getUpdates` polls |
 | `telegram_bot_token` | string | – | **Empty = unchanged.** Encrypted NVS |
 | `telegram_chat_id` | string | – | **Empty = unchanged.** Encrypted NVS |
 
@@ -477,7 +476,7 @@ values is edited by hand. No presets are shipped.
 
 | Method | Path | Auth | CSRF | Body / params |
 | --- | --- | --- | --- | --- |
-| GET | `/api/wifi/scan` | no | – | – |
+| GET | `/api/wifi/scan` | **yes** | – | – |
 | POST | `/api/wifi` | **yes** | **yes** | `{"ssid": "...", "password": "..."}` |
 
 `GET /api/wifi/scan` blocks for roughly 300 ms per channel and returns:
@@ -501,7 +500,7 @@ Requires `-DINCLUDE_SD_CARD` (default on).
 
 | Method | Path | Auth | CSRF | Params |
 | --- | --- | --- | --- | --- |
-| GET | `/api/sd/list` | **yes** | – | `path` (default `/`) |
+| GET | `/api/sd/list` | **yes** | – | `path` (default `/`), `offset`, `limit` (max 100) |
 | GET | `/sd-list` | **yes** | – | Alias of `/api/sd/list` |
 | GET | `/api/sd/download` | **yes** | – | `file` (required) |
 | DELETE | `/api/sd/delete` | **yes** | **yes** | `file` (required) |
@@ -677,10 +676,10 @@ curl -u admin:<password> -X POST \
 
 | Method | Path | Auth | CSRF | Response |
 | --- | --- | --- | --- | --- |
-| GET | `/api/events` | no | – | Event ring, newest first |
-| GET | `/events` | no | – | Alias of `/api/events` |
-| GET | `/log` | no | – | `text/plain` |
-| GET | `/log-viewer` | no | – | `text/html` |
+| GET | `/api/events` | **yes** | – | Event ring, newest first |
+| GET | `/events` | **yes** | – | Alias of `/api/events` |
+| GET | `/log` | **yes** | – | `text/plain` |
+| GET | `/log-viewer` | **yes** | – | `text/html` |
 | POST | `/api/motion/reset` | **yes** | **yes** | Reset the background model |
 
 `/api/events` requires `-DINCLUDE_EVENT_LOG` (default on). Up to `EVENT_LOG_SIZE`

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Settings - CamS3</title>
+    <title data-i18n="title.settings">Settings - CamS3</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/style.css">
     <!-- common.js is intentionally NOT deferred: it publishes T/esc/showToast/apiFetch
@@ -688,11 +688,13 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         })
-        .then(r => r.json())
-        .then(result => {
-            showToast(result.message || 'Saved', result.success ? 'success' : 'error');
+        .then(r => r.json().catch(() => ({})).then(result => ({ r, result })))
+        .then(({ r, result }) => {
+            if (r.status === 401) return;   // apiFetch already showed the 401 toast
+            const ok = r.ok && result.success !== false;
+            showToast(result.message || (ok ? T('common.saved') : T('common.error')), ok ? 'success' : 'error');
         })
-        .catch(() => showToast('Error', 'error'));
+        .catch(() => showToast(T('common.error'), 'error'));
     }
 
     </script>

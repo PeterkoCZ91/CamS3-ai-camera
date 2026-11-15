@@ -44,11 +44,20 @@ static bool persist() {
         o["lenc"] = profiles[i].lenc;
         o["sharpness"] = profiles[i].sharpness;
     }
-    File f = LittleFS.open(LENS_PROFILES_FILE, "w");
+    // Atomic replace: write a .tmp, then rename over the real file, so a power cut
+    // mid-write cannot leave a truncated profiles file.
+    const char* tmpPath = LENS_PROFILES_FILE ".tmp";
+    File f = LittleFS.open(tmpPath, "w");
     if (!f) return false;
     bool ok = serializeJson(doc, f) > 0;
     f.close();
-    return ok;
+    if (!ok) { LittleFS.remove(tmpPath); return false; }
+    // lfs_rename replaces an existing destination atomically.
+    if (!LittleFS.rename(tmpPath, LENS_PROFILES_FILE)) {
+        LittleFS.remove(tmpPath);
+        return false;
+    }
+    return true;
 }
 
 static int indexOf(const char* name) {

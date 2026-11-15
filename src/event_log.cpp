@@ -6,6 +6,8 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define EVENTS_FILE "/events.jsonl"
 
@@ -19,6 +21,21 @@ static portMUX_TYPE ring_mux = portMUX_INITIALIZER_UNLOCKED;
 // motion event triggered a full read plus, past the cap, a full rewrite — from the
 // motion task, on LittleFS.
 static int file_lines = 0;
+
+// Serialises every access to EVENTS_FILE and file_lines: logEvent() is called from
+// motion, web and wifi tasks concurrently; interleaved append/rotate corrupted lines.
+static SemaphoreHandle_t file_mutex = NULL;
+
+// Escape a detail string for embedding in a JSON string literal (zone names can
+// contain quotes/backslashes/control chars which broke both the API and events.jsonl).
+static void appendEscaped(String& out, const char* s) {
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { out += '\\'; out += (char)c; }
+        else if (c < 0x20) { out += ' '; }
+        else out += (char)c;
+    }
+}
 
 // Rotate in batches instead of on every line over the cap: one rewrite per
 // ROTATE_SLACK events rather than one per event.
@@ -43,8 +60,10 @@ const char* eventTypeName(EventType type) {
 }
 
 static void writeLine(File& f, const EventEntry& e) {
+    String d;
+    appendEscaped(d, e.detail);
     f.printf("{\"u\":%lu,\"t\":\"%s\",\"d\":\"%s\"}\n",
-             (unsigned long)e.uptime_s, eventTypeName(e.type), e.detail);
+             (unsigned long)e.uptime_s, eventTypeName(e.type), d.c_str());
 }
 
 // Rewrite the file from the in-RAM ring, which by definition already holds exactly
@@ -68,7 +87,10 @@ static void rotateFile() {
     memcpy(snapshot, ring, sizeof(EventEntry) * EVENT_LOG_SIZE);
     portEXIT_CRITICAL(&ring_mux);
 
-    File w = LittleFS.open(EVENTS_FILE, "w");
+    // Write a temp file and rename over the original: a power cut mid-rotation used
+    // to leave a truncated/empty events.jsonl.
+    const char* tmpName = "/events.jsonl.tmp";
+    File w = LittleFS.open(tmpName, "w");
     if (!w) { free(snapshot); return; }
     int start = (count < EVENT_LOG_SIZE) ? 0 : head;
     for (int i = 0; i < count; i++) {
@@ -76,6 +98,7 @@ static void rotateFile() {
     }
     w.close();
     free(snapshot);
+    if (!LittleFS.rename(tmpName, EVENTS_FILE)) { LittleFS.remove(tmpName); return; }
     file_lines = count;
 }
 
@@ -124,6 +147,7 @@ static void loadFromFile() {
 }
 
 void initEventLog() {
+    if (!file_mutex) file_mutex = xSemaphoreCreateRecursiveMutex();
     memset(ring, 0, sizeof(ring));
     loadFromFile();
     logEvent(EVT_BOOT);
@@ -141,27 +165,38 @@ void logEvent(EventType type, const char* detail) {
     if (ring_count < EVENT_LOG_SIZE) ring_count++;
     portEXIT_CRITICAL(&ring_mux);
 
-    appendToFile(e);
+    if (file_mutex && xSemaphoreTakeRecursive(file_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        appendToFile(e);
+        xSemaphoreGiveRecursive(file_mutex);
+    }
     logCapture("[EVT] %s %s\n", eventTypeName(type), detail ? detail : "");
 }
 
 String getEventsJSON() {
-    String out = "[";
+    // Copy the ring inside the critical section; reading it outside raced with
+    // logEvent() overwriting entries (torn detail strings). Heap, not stack (5.6 kB).
+    EventEntry* snap = (EventEntry*)malloc(sizeof(EventEntry) * EVENT_LOG_SIZE);
+    if (!snap) return "[]";
+    int count, head;
     portENTER_CRITICAL(&ring_mux);
-    int count = ring_count;
-    int head  = ring_head;
+    count = ring_count;
+    head  = ring_head;
+    memcpy(snap, ring, sizeof(EventEntry) * EVENT_LOG_SIZE);
     portEXIT_CRITICAL(&ring_mux);
 
+    String out = "[";
+    out.reserve(count * 60 + 4);
     for (int i = 0; i < count; i++) {
         int idx = (head - 1 - i + EVENT_LOG_SIZE) % EVENT_LOG_SIZE;
-        const EventEntry& e = ring[idx];
+        const EventEntry& e = snap[idx];
         if (i > 0) out += ',';
         out += "{\"uptime_s\":"; out += e.uptime_s;
         out += ",\"type\":\"";   out += eventTypeName(e.type);
-        out += "\",\"detail\":\""; out += e.detail;
+        out += "\",\"detail\":\""; appendEscaped(out, e.detail);
         out += "\"}";
     }
     out += "]";
+    free(snap);
     return out;
 }
 

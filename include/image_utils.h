@@ -22,6 +22,12 @@
 #define IMG_DECODE_MAX_H   (IMG_SRC_MAX_H / 8)
 #define IMG_DECODE_MAX_SZ  (IMG_DECODE_MAX_W * IMG_DECODE_MAX_H * 2)
 
+// Size of the per-task PSRAM scratch buffer used to copy a JPEG out of its ring
+// slot before slow work (SD write, Telegram enqueue). Equals the ring slot size
+// (256 kB), so any frame the ring can hold fits. Each task allocates its buffer
+// once with ps_malloc and keeps it — no per-event malloc/free fragmentation.
+#define IMG_JPEG_COPY_MAX   (256 * 1024)
+
 // Decoded dimensions for a JPG_SCALE_8X decode of a srcW x srcH frame.
 // tjpgd emits whole MCUs, so a source that is not a multiple of 8 rounds up.
 static inline void imgDecodedDims8x(uint16_t srcW, uint16_t srcH, int& decW, int& decH) {
