@@ -22,8 +22,10 @@ String getMACAddress();
 // Captive portal
 bool isCaptivePortalActive();
 
-// Scan networks
-String scanNetworksJson();
+// Scan networks without blocking the caller. Returns 200 with the JSON array in
+// `out` when a result younger than 10 s exists; 202 while a scan is requested or
+// running (poll again); 500 when the last scan failed (the next poll retries).
+int wifiScanPoll(String& out);
 
 // Connect to new network (blocking — up to ~10s). Do not call from async web handlers.
 bool wifiConnect(const String& ssid, const String& password);

@@ -14,6 +14,7 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 ### Fixed
 - **Black live view while A12 is connected.** The stream server runs every handler on one thread, so A12 holding `:81/detection-stream` left `:81/stream` waiting forever. Viewers now get their own server on **port 82**; `stream_url` in `/api/status`, `/a12/status` and `/stream-stats` points there (and back at port 81 if port 82 could not start). `:81/stream` is unchanged for existing setups. Home Assistant MJPEG cameras should be moved to `:82/stream`.
 - `scheduleReboot()` honours its delay argument.
+- **Wi-Fi scan froze the web server.** `GET /api/wifi/scan` ran a ~4 s synchronous scan inside the async handler, so the UI, `/health` and every other port-80 request stalled meanwhile. The main loop now runs the scan in the background; the endpoint answers `202 {"scanning":true}` until the result is ready and the Wi-Fi page polls it. The camera is still unreachable for ~3.5-4 s while the radio scans; that part is the radio and cannot be avoided. Scripts calling `/api/wifi/scan` (or `/wifi-scan`) must poll for the `200`.
 
 ### Fixed (code review 2026-11)
 - **Motion events swallowed** when movement restarted inside `cooldown_sec` after the previous event (dead `cooldownExpired` branch); person detection now keeps inferring for 8 s after a motion trigger so the tracker can reach `confirm_hits` inside one event.

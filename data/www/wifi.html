@@ -109,10 +109,17 @@
         searching.textContent = T('wifi.scan.searching');
         list.appendChild(searching);
 
-        apiFetch('/api/wifi/scan').then(r => {
+        // The camera scans in the background (202 = still scanning), so the page
+        // asks once a second; a scan takes ~4 s, 25 tries is a generous ceiling.
+        const pollScan = tries => apiFetch('/api/wifi/scan').then(r => {
+            if (r.status === 202 && tries > 0) {
+                return new Promise(res => setTimeout(res, 1000)).then(() => pollScan(tries - 1));
+            }
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
-        }).then(raw => {
+        });
+        pollScan(25).then(raw => {
+            if (!Array.isArray(raw)) throw new Error('scan timeout');
             // The same SSID shows up once per access point: keep the strongest.
             const best = new Map();
             raw.forEach(n => {

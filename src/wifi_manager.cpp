@@ -28,6 +28,23 @@ static unsigned long lastSetupRetryMs  = 0;
 static unsigned long setupRetryStartMs = 0;
 static bool          setupRetryActive  = false;
 
+// Wi-Fi scan, run from the main loop. A synchronous scan took ~4 s inside the async
+// web handler and froze every other request on port 80 (status, /health for A12)
+// while it ran. The handler now only asks; wifiLoop() starts the scan when the radio
+// is not busy with a connect or a setup-mode retry, polls it, and keeps the result
+// for the next request. Results are cached JSON behind a mutex because the loop
+// writes them and the async_tcp task reads them.
+enum WifiScanState { SCAN_IDLE, SCAN_REQUESTED, SCAN_RUNNING, SCAN_DONE, SCAN_FAILED };
+static volatile WifiScanState scanState = SCAN_IDLE;
+static unsigned long scanStartedMs = 0;
+static unsigned long scanDoneMs    = 0;
+static String scanResultJson;
+static SemaphoreHandle_t scanMutex = NULL;
+static const unsigned long SCAN_RESULT_FRESH_MS = 10000;  // reuse a scan this young
+static const unsigned long SCAN_TIMEOUT_MS      = 20000;  // a scan never takes this long
+static void scanCancel();
+static void wifiScanLoop();
+
 // Silent-death watchdog. WiFi.status() can stick at WL_CONNECTED after the
 // link is actually dead (common on ESP32 when the AP vanishes without a
 // disconnect notification). Track last time we observed signs of life
@@ -67,6 +84,8 @@ static char              pendingPass[65];
 static portMUX_TYPE      pendingMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool wifiInit() {
+    if (!scanMutex) scanMutex = xSemaphoreCreateMutex();
+
     WiFi.setHostname(appConfig.wifi.hostname.c_str());
     WiFi.onEvent(onWiFiEvent);
     WiFi.setAutoReconnect(true);
@@ -141,8 +160,11 @@ void wifiLoop() {
         String ssid(ssidBuf);
         String pass(passBuf);
         memset(passBuf, 0, sizeof(passBuf));
+        scanCancel();   // the connect switches the radio mode under a running scan
         wifiConnect(ssid, pass);
     }
+
+    wifiScanLoop();
 
     // Setup/AP fallback is not terminal: periodically retry the stored SSID without
     // tearing down the portal (AP+STA), and leave setup mode once it connects.
@@ -174,7 +196,8 @@ void wifiLoop() {
                 WiFi.mode(WIFI_AP);
                 logCapture("[%s] Setup-mode STA retry failed, staying in portal\n", TAG);
             }
-        } else if (!pendingConnect && now - lastSetupRetryMs > SETUP_RETRY_INTERVAL_MS) {
+        } else if (!pendingConnect && scanState != SCAN_REQUESTED && scanState != SCAN_RUNNING
+                   && now - lastSetupRetryMs > SETUP_RETRY_INTERVAL_MS) {
             lastSetupRetryMs = now;
             // Don't yank the radio (AP channel may move) while someone is using the portal.
             if (WiFi.softAPgetStationNum() == 0) {
@@ -271,22 +294,81 @@ String getMACAddress() {
 
 bool isCaptivePortalActive() { return captivePortalActive; }
 
-String scanNetworksJson() {
-    int n = WiFi.scanNetworks(false, false, false, 300);
+static void scanStoreResults(int n) {
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
-
     for (int i = 0; i < n; i++) {
         JsonObject net = arr.add<JsonObject>();
         net["ssid"] = WiFi.SSID(i);
         net["rssi"] = WiFi.RSSI(i);
         net["enc"]  = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
     }
-
     WiFi.scanDelete();
-    String result;
-    serializeJson(doc, result);
-    return result;
+    String json;
+    serializeJson(doc, json);
+    if (scanMutex && xSemaphoreTake(scanMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        scanResultJson = json;
+        xSemaphoreGive(scanMutex);
+    }
+}
+
+static void scanCancel() {
+    if (scanState == SCAN_RUNNING) WiFi.scanDelete();
+    scanState = SCAN_IDLE;
+}
+
+// Main-loop half of the scan. Never starts while the radio is being reconfigured:
+// a mode change in the middle of a scan aborts it, and in setup mode the scan itself
+// adds the STA interface the retry logic also drives.
+static void wifiScanLoop() {
+    unsigned long now = millis();
+    if (scanState == SCAN_REQUESTED) {
+        if (pendingConnect || setupRetryActive) return;   // wait for the radio
+        // Async: returns at once. The radio is off its home channel while it scans,
+        // so the camera answers nothing (A12 included) for ~3.5-4 s; that is the
+        // radio, not this code. Do not shorten the dwell to save time: the core
+        // gives up after dwell x 20 ms, and at 120 ms a scan that still takes ~4 s
+        // while connected is reported as failed (measured).
+        int r = WiFi.scanNetworks(true, false, false, 300);
+        if (r == WIFI_SCAN_FAILED) {
+            logCapture("[%s] WiFi scan could not start\n", TAG);
+            scanState = SCAN_FAILED;
+            return;
+        }
+        scanStartedMs = now;
+        scanState = SCAN_RUNNING;
+        return;
+    }
+    if (scanState == SCAN_RUNNING) {
+        int n = WiFi.scanComplete();
+        if (n >= 0) {
+            scanStoreResults(n);
+            scanDoneMs = now;
+            scanState = SCAN_DONE;
+        } else if (n == WIFI_SCAN_FAILED || now - scanStartedMs > SCAN_TIMEOUT_MS) {
+            WiFi.scanDelete();
+            logCapture("[%s] WiFi scan failed\n", TAG);
+            scanState = SCAN_FAILED;
+        }
+    }
+}
+
+int wifiScanPoll(String& out) {
+    WifiScanState st = scanState;
+    if (st == SCAN_DONE && millis() - scanDoneMs < SCAN_RESULT_FRESH_MS) {
+        if (scanMutex && xSemaphoreTake(scanMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            out = scanResultJson;
+            xSemaphoreGive(scanMutex);
+            return 200;
+        }
+        return 202;   // the loop is writing a newer result right now
+    }
+    if (st == SCAN_FAILED) {
+        scanState = SCAN_IDLE;   // the next poll starts a fresh attempt
+        return 500;
+    }
+    if (st == SCAN_IDLE || st == SCAN_DONE) scanState = SCAN_REQUESTED;
+    return 202;
 }
 
 bool wifiConnect(const String& ssid, const String& password) {

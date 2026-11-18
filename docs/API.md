@@ -482,11 +482,22 @@ values is edited by hand. No presets are shipped.
 | GET | `/api/wifi/scan` | **yes** | – | – |
 | POST | `/api/wifi` | **yes** | **yes** | `{"ssid": "...", "password": "..."}` |
 
-`GET /api/wifi/scan` blocks for roughly 300 ms per channel and returns:
+`GET /api/wifi/scan` does not scan in the request. The first call asks the main
+loop to start a background scan (300 ms per channel, about 4 s) and answers
+`202 {"scanning":true}`; keep polling about once a second. During the scan the radio
+is off its home channel, so the camera does not answer anything — streams and
+`/health` included — for roughly 3.5–4 s. That outage is the radio's and cannot be
+avoided; what the background scan removes is the web server being blocked beyond it. When the scan is done
+the next call returns `200` with the list, and the same list is served for 10 s
+after that before a call starts a new scan:
 
 ```json
 [{"ssid":"MyNetwork","rssi":-52,"enc":true}]
 ```
+
+`500 {"error":"scan failed"}` means the radio refused or the scan timed out; the
+next call tries again. A scan waits while a connect or a setup-mode retry of the
+stored network is using the radio, and a `POST /api/wifi` cancels a running scan.
 
 `enc` is `false` only for genuinely open networks.
 

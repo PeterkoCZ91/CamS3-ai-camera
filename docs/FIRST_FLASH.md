@@ -223,8 +223,8 @@ If the portal does not appear by itself, browse to `http://192.168.4.1/` manuall
 ### 8.1 Connect to your network
 
 In the portal open the **WiFi** page. It calls `GET /api/wifi/scan`, lists the
-networks it can see with signal strength, and posts your choice to
-`POST /api/wifi`.
+networks it can see with signal strength (the scan runs in the background and takes
+a few seconds; the page waits for it), and posts your choice to `POST /api/wifi`.
 
 The response comes back immediately (`{"success":true,"message":"Connecting..."}`) —
 that is by design, because the blocking connect happens in the main loop, not in the

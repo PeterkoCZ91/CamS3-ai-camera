@@ -1022,7 +1022,12 @@ static void scheduleReboot(uint32_t delayMs = 500) {
 // API: GET /api/wifi/scan
 static void handleApiWifiScan(AsyncWebServerRequest* request) {
     if (!requireAuth(request)) return;
-    request->send(200, "application/json", scanNetworksJson());
+    // Never scans here: the main loop does, and the client polls until it is done.
+    String json;
+    int code = wifiScanPoll(json);
+    if (code == 200)      request->send(200, "application/json", json);
+    else if (code == 202) request->send(202, "application/json", "{\"scanning\":true}");
+    else                  request->send(500, "application/json", "{\"error\":\"scan failed\"}");
 }
 
 // API: POST /api/reboot
