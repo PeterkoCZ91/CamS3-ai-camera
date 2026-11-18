@@ -1,7 +1,7 @@
 # CamS3 5MP Advanced Camera Firmware
 
 [![Build](https://github.com/PeterkoCZ91/CamS3-ai-camera/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/PeterkoCZ91/CamS3-ai-camera/actions/workflows/build.yml)
-[![Firmware version](https://img.shields.io/badge/firmware-v2.0.0-2ea44f)](CHANGELOG.md)
+[![Firmware version](https://img.shields.io/badge/firmware-v2.1.0-2ea44f)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/github/license/PeterkoCZ91/CamS3-ai-camera)](LICENSE)
 
 [![Hardware: M5Stack Unit CamS3 5MP](https://img.shields.io/badge/hardware-M5Stack%20Unit%20CamS3%205MP-orange)](https://docs.m5stack.com/en/unit/Unit-CAMS3%205MP)

@@ -5,6 +5,8 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-18
+
 ### Note before downgrading
 
 - Stored secrets are rewritten on first boot in a new format with an integrity tag
