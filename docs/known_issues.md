@@ -435,10 +435,13 @@ ring mirrored to `/events.jsonl`, and `detail` is capped at 48 bytes.
 is gone, and only output written through `logCapture()` appears — a module calling
 `Serial.printf()` directly is invisible to `/log` and `/log-viewer`.
 
-**Core dumps cannot be retrieved over HTTP.** The partition table reserves 64 kB for
-coredumps and `/api/status` reports `coredump_present` and `coredump_size`, but
-getting the dump out requires `esp-coredump` over a serial connection. There is no
-download endpoint.
+**Core dumps are decoded off the device.** The partition table reserves 64 kB for
+them; `/api/status` reports `coredump_present` and `coredump_size`,
+`GET /api/coredump/summary` gives the crashing task, PC and backtrace, and
+`GET /api/coredump` downloads the raw ELF dump. Turning addresses into source lines
+needs the ELF of the exact build that crashed (`app_elf_sha256` in the summary;
+8 hex digits on core 3.x, 16 on 2.0.x), so keep the `firmware.elf` of every build you
+flash.
 
 **All numeric settings are range-checked** by `sanitizeConfig()`, both when
 `POST /api/settings` applies them and when `config.json` is loaded, so a hand-edited or
