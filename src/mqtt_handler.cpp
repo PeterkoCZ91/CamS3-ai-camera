@@ -11,6 +11,7 @@
 #include <MQTT.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "flash_worker.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_heap_caps.h>
@@ -43,6 +44,7 @@ static bool              haDiscoverySent = false;
 static char              pendingConfigKey[48] = {};
 static char              pendingConfigPayload[64] = {};
 static volatile bool     pendingConfigMessage = false;
+static bool             mqttCaRequested = false;
 static char*             mqttCaCert = NULL;  // lazily loaded from /ca.pem
 
 // Offline publish queue — holds last N publications while disconnected,
@@ -108,7 +110,8 @@ static void mqttPublishOrQueue(const char* topic, const char* payload, bool reta
     }
 }
 
-static void loadCaIfNeeded() {
+// Reads flash, so it runs on the flash worker (called from setup or via flashDefer).
+static void loadCaJob() {
     if (mqttCaCert || !appConfig.mqtt.tls_enabled) return;
     if (!LittleFS.exists("/ca.pem")) return;
     File f = LittleFS.open("/ca.pem", "r");
@@ -210,7 +213,7 @@ static void mqttHandlePendingConfig() {
     // Skip the flash write when nothing changed (a retained message is redelivered
     // after every reconnect and would otherwise wear the flash).
     if (needSave) {
-        saveConfig();
+        saveConfigDeferred();  // task stack may be in PSRAM: no flash here
         logCapture("[%s] Applied MQTT config %s=%s\n", TAG, key, payload);
     } else if (recognised) {
         logCapture("[%s] MQTT config %s=%s unchanged\n", TAG, key, payload);
@@ -385,7 +388,14 @@ static bool mqttConnect() {
 
     // Choose plaintext or TLS transport; switching requires a fresh begin().
     if (appConfig.mqtt.tls_enabled) {
-        loadCaIfNeeded();
+        // /ca.pem lives in flash: ask the flash worker (this task's stack may be in
+        // PSRAM) and retry the connect on the next cycle. Asked once per TLS session;
+        // no file means the old behaviour (encrypted but unverified).
+        if (!mqttCaCert && !mqttCaRequested) {
+            mqttCaRequested = true;
+            flashDefer(loadCaJob);
+            return false;
+        }
         if (!mqttSecureInUse) {
             if (mqttCaCert) {
                 mqttNetSecure.setCACert(mqttCaCert);
@@ -399,6 +409,7 @@ static bool mqttConnect() {
         mqttClient.begin(appConfig.mqtt.server.c_str(), appConfig.mqtt.port, mqttNetSecure);
     } else {
         mqttSecureInUse = false;
+        mqttCaRequested = false;   // TLS switched off: look for /ca.pem again next time
         mqttNet.setTimeout(5);  // seconds: bounds the TCP connect
         mqttClient.begin(appConfig.mqtt.server.c_str(), appConfig.mqtt.port, mqttNet);
     }
@@ -455,6 +466,7 @@ void mqttInit() {
                           TAG, MQTT_QUEUE_CAP, (int)(MQTT_QUEUE_CAP * sizeof(MqttQueuedMsg)));
         }
     }
+    loadCaJob();   // runs in setup() (internal stack), so it may read flash directly
     mqttClient.onMessage(mqttMessageReceived);
     logCapture("[%s] MQTT handler initialized\n", TAG);
 }

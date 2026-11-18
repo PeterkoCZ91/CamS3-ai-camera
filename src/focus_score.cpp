@@ -53,6 +53,7 @@ static float centreLaplacianVariance(const uint8_t* rgb565, int w, int h) {
     return (float)(sum2 / n - mean * mean);
 }
 
+// Stack lives in PSRAM (no flash writes here) to spare internal heap.
 static void focusTask(void*) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(FOCUS_INTERVAL_MS));
@@ -110,7 +111,8 @@ void focusScoreTouch(bool resetPeak) {
     bool start = !taskStarted;
     taskStarted = true;
     portEXIT_CRITICAL(&mux);
-    if (start && xTaskCreate(focusTask, "focus", 6144, NULL, 1, NULL) != pdPASS) {
+    if (start && xTaskCreateWithCaps(focusTask, "focus", 6144, NULL, 1, NULL,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         taskStarted = false;
         logCapture("[%s] task create failed\n", TAG);
     }

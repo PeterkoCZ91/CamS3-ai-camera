@@ -20,6 +20,7 @@
 #include <SD.h>
 #include <FS.h>
 #include "sd_store.h"
+#include "flash_worker.h"
 #define TG_PENDING_DIR       "/telegram_pending"
 #define TG_PENDING_MAX       50     // cap so we don't fill the card
 #define TG_PENDING_MAGIC     0x54475057UL  // "TGPW"
@@ -448,7 +449,9 @@ static bool sendPhotoSync(const uint8_t* jpeg, size_t jpegLen, const char* capti
 
 // While muted the notify_on_* flags are temporarily false; persist the user's real
 // values instead so a reboot or any save never turns a timed mute into a permanent one.
-static void saveConfigUnmuted() {
+// Runs on the flash worker: this task's stack may live in PSRAM, which must never
+// reach flash (cache is off during the write).
+static void saveConfigUnmutedJob() {
     if (silentUntilMs == 0) { saveConfig(); return; }
     bool m = appConfig.telegram.notify_on_motion, f = appConfig.telegram.notify_on_face,
          p = appConfig.telegram.notify_on_person;
@@ -460,6 +463,7 @@ static void saveConfigUnmuted() {
     appConfig.telegram.notify_on_face   = f;
     appConfig.telegram.notify_on_person = p;
 }
+static void saveConfigUnmuted() { flashDefer(saveConfigUnmutedJob); }
 
 static void handleCommand(const String& cmd, const String& args) {
     logCapture("[%s] Command: /%s %s\n", TAG, cmd.c_str(), args.c_str());

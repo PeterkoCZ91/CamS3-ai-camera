@@ -1,5 +1,6 @@
 #include "event_log.h"
 #include "ws_log.h"
+#include "flash_worker.h"
 
 #ifdef INCLUDE_EVENT_LOG
 
@@ -21,6 +22,12 @@ static portMUX_TYPE ring_mux = portMUX_INITIALIZER_UNLOCKED;
 // motion event triggered a full read plus, past the cap, a full rewrite — from the
 // motion task, on LittleFS.
 static int file_lines = 0;
+
+// Entries are appended to the file by the flash worker, not by the caller: logEvent()
+// is called from motion/person tasks whose stacks live in PSRAM and which therefore
+// must never reach flash. Two monotonic counters tell the worker what is still unwritten.
+static uint32_t total_logged  = 0;   // guarded by ring_mux
+static uint32_t total_written = 0;   // touched only under file_mutex
 
 // Serialises every access to EVENTS_FILE and file_lines: logEvent() is called from
 // motion, web and wifi tasks concurrently; interleaved append/rotate corrupted lines.
@@ -150,7 +157,32 @@ void initEventLog() {
     if (!file_mutex) file_mutex = xSemaphoreCreateRecursiveMutex();
     memset(ring, 0, sizeof(ring));
     loadFromFile();
+    total_logged = total_written = 0;  // everything loaded is already in the file
     logEvent(EVT_BOOT);
+}
+
+// Runs on the flash worker (or inline during early boot): append every entry the file
+// has not seen yet. Entries older than the ring (burst > EVENT_LOG_SIZE) are gone from
+// RAM already and are skipped.
+static void eventFlushJob() {
+    if (!file_mutex || xSemaphoreTakeRecursive(file_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
+    for (;;) {
+        EventEntry e;
+        bool have = false;
+        portENTER_CRITICAL(&ring_mux);
+        uint32_t pending = total_logged - total_written;
+        if (pending > (uint32_t)ring_count) { total_written = total_logged - ring_count; pending = ring_count; }
+        if (pending) {
+            int idx = (ring_head - (int)pending + EVENT_LOG_SIZE * 2) % EVENT_LOG_SIZE;
+            e = ring[idx];
+            total_written++;
+            have = true;
+        }
+        portEXIT_CRITICAL(&ring_mux);
+        if (!have) break;
+        appendToFile(e);
+    }
+    xSemaphoreGiveRecursive(file_mutex);
 }
 
 void logEvent(EventType type, const char* detail) {
@@ -163,12 +195,10 @@ void logEvent(EventType type, const char* detail) {
     ring[ring_head] = e;
     ring_head = (ring_head + 1) % EVENT_LOG_SIZE;
     if (ring_count < EVENT_LOG_SIZE) ring_count++;
+    total_logged++;
     portEXIT_CRITICAL(&ring_mux);
 
-    if (file_mutex && xSemaphoreTakeRecursive(file_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-        appendToFile(e);
-        xSemaphoreGiveRecursive(file_mutex);
-    }
+    flashDefer(eventFlushJob);
     logCapture("[EVT] %s %s\n", eventTypeName(type), detail ? detail : "");
 }
 

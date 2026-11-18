@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_task_wdt.h>
+#include "flash_worker.h"
 #include <esp_ota_ops.h>
 #include <esp_idf_version.h>
 #include "soc/soc.h"
@@ -453,6 +454,9 @@ void setup() {
         logCapture("[%s] LittleFS mounted\n", TAG);
     }
 
+    // Worker for flash writes, so PSRAM-stack tasks never touch flash themselves.
+    flashWorkerStart();
+
     // Restart accounting needs LittleFS and should run before anything can crash.
     systemStatsBegin();
 
@@ -534,7 +538,8 @@ void setup() {
     motionDetectSetSemaphore(motionCascadeSem);
     #endif
     if (motionOk) {
-        xTaskCreatePinnedToCore(motionDetectTask, "motion", 6144, NULL, 3, NULL, 0);
+        xTaskCreatePinnedToCoreWithCaps(motionDetectTask, "motion", 6144, NULL, 3, NULL, 0,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         logCapture("[%s] Motion detection task created\n", TAG);
     } else {
         logCapture("[%s] Motion detection NOT started (camera or buffer init failed)\n", TAG);
@@ -545,7 +550,8 @@ void setup() {
     #if defined(INCLUDE_PERSON_DETECT) && defined(INCLUDE_MOTION_DETECT) && !defined(LITE_MODE)
     if (personDetectInit()) {
         personDetectSetSemaphore(motionCascadeSem);
-        xTaskCreatePinnedToCore(personDetectTask, "persondet", 8192, NULL, 2, NULL, 0);
+        xTaskCreatePinnedToCoreWithCaps(personDetectTask, "persondet", 8192, NULL, 2, NULL, 0,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         logCapture("[%s] Person detection task created\n", TAG);
     } else {
         logCapture("[%s] Person detection init failed — task NOT started\n", TAG);
@@ -565,7 +571,11 @@ void setup() {
     // Start timelapse task
     #if defined(INCLUDE_TIMELAPSE) && !defined(LITE_MODE)
     timelapseInit();
-    xTaskCreatePinnedToCore(timelapseTask, "timelapse", 6144, NULL, 2, NULL, 0);
+    // Stack in PSRAM: this task never writes flash (SD only), so it may live there
+    // and spare ~6 kB of scarce internal heap. Tasks that call saveConfig()/logEvent()
+    // (flash writes with the cache off) must keep internal stacks.
+    xTaskCreatePinnedToCoreWithCaps(timelapseTask, "timelapse", 6144, NULL, 2, NULL, 0,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     logCapture("[%s] Timelapse task created\n", TAG);
     #endif
 
@@ -575,14 +585,16 @@ void setup() {
     logCapture("[%s] NTP time sync configured\n", TAG);
 
     telegramInit();
-    xTaskCreatePinnedToCore(telegramTask, "telegram", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCoreWithCaps(telegramTask, "telegram", 8192, NULL, 2, NULL, 0,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     logCapture("[%s] Telegram task created\n", TAG);
     #endif
 
     // Start MQTT task
     #ifdef INCLUDE_MQTT
     mqttInit();
-    xTaskCreatePinnedToCore(mqttTask, "mqtt", 6144, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCoreWithCaps(mqttTask, "mqtt", 6144, NULL, 2, NULL, 0,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     logCapture("[%s] MQTT task created\n", TAG);
     #endif
 
