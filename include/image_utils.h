@@ -24,9 +24,9 @@
 
 // Size of the per-task PSRAM scratch buffer used to copy a JPEG out of its ring
 // slot before slow work (SD write, Telegram enqueue). Equals the ring slot size
-// (256 kB), so any frame the ring can hold fits. Each task allocates its buffer
+// (512 kB, MAX_FRAME_SIZE in camera_manager.cpp: keep the two equal), so any frame the ring can hold fits. Each task allocates its buffer
 // once with ps_malloc and keeps it — no per-event malloc/free fragmentation.
-#define IMG_JPEG_COPY_MAX   (256 * 1024)
+#define IMG_JPEG_COPY_MAX   (512 * 1024)
 
 // Decoded dimensions for a JPG_SCALE_8X decode of a srcW x srcH frame.
 // tjpgd emits whole MCUs, so a source that is not a multiple of 8 rounds up.

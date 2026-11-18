@@ -24,11 +24,11 @@ internal RAM. Measured on a camera, free internal heap fell from ~103 kB (2.1.0)
 
 ## Phase 1: things the new core may already fix (cheap to check)
 
-5. **Re-test resolutions above UXGA (§2).** The limit came from the 2.0.17
+5. **(done, unreleased) Re-test resolutions above UXGA (§2).** QXGA works: ~11 fps, no errors, clamp widened to 17 and ring slots 512 kB. Original plan: **Re-test resolutions above UXGA (§2).** The limit came from the 2.0.17
    camera driver; 3.3.9 ships esp32-camera 2.1.6. Try QXGA/QSXGA with
    `jpeg_quality` 10-12 for 30 min. If capture holds, widen the clamp and the
    settings page. Watch the 256 kB ring-slot limit (§9) at the same time.
-6. **Frame size vs ring slot (§9).** If larger frames become usable, size
+6. **(done, unreleased: fixed 512 kB slots) Frame size vs ring slot (§9).** If larger frames become usable, size
    `MAX_FRAME_SIZE` from the selected frame size instead of a fixed 256 kB
    (PSRAM has room: 3 slots x 512 kB = 1.5 MB of 8 MB).
 
@@ -45,7 +45,7 @@ internal RAM. Measured on a camera, free internal heap fell from ~103 kB (2.1.0)
 
 ## Phase 3: security hardening
 
-9. **Optional auth for port 81 streams (§3).** Basic Auth or a token query
+9. **(done, unreleased) Optional auth for port 81 streams (§3).** Basic Auth or a token query
    parameter behind a setting, off by default so existing Home Assistant / A12
    consumers keep working; A12's detection consumer gets the credential.
 10. **Optional certificate validation for Telegram (§4).** Use the ESP-IDF CA

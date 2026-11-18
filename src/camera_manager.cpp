@@ -216,8 +216,9 @@ void cameraSensorViewRequestReg(uint16_t reg) {
 
 bool cameraSensorViewOneShotPending() { return sensorOneShotPending; }
 
-// Max JPEG buffer size per slot (256KB should cover up to UXGA JPEG)
-#define MAX_FRAME_SIZE (256 * 1024)
+// Max JPEG buffer size per slot. 512 kB covers a QXGA (2048x1536) JPEG at quality
+// 10-12; 3 slots cost 1.5 MB of the 8 MB PSRAM.
+#define MAX_FRAME_SIZE (512 * 1024)
 
 // Allocate the ring buffer once per boot and keep it for the process lifetime.
 // The slots are plain PSRAM buffers with no camera-driver dependency, so a camera

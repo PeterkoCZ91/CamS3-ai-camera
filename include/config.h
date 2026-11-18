@@ -29,9 +29,9 @@
 #define STREAM_TASK_PRIO     5
 
 // Frame buffer config
-// FRAMESIZE_UXGA (1600x1200). QSXGA (framesize_t 21, 2560x1920) is the sensor
-// maximum, but the PY260 driver in arduino-esp32 2.0.17 cannot sustain capture at
-// that size (0 fps, errors) — which is why the UI only offers up to UXGA.
+// FRAMESIZE_UXGA (1600x1200) is the default. The API/UI allow up to QXGA (2048x1536,
+// API value 17): with arduino-esp32 3.3.9 an OV3660 holds ~11 fps there. Sizes
+// above QXGA stay blocked; the old 2.0.17 driver produced 0 fps above UXGA.
 // (The old comment said "QSXGA (14)"; 14 is FHD. 21 is QSXGA.)
 // frame_size in config.json, /api/settings, the UI and A12 uses the framesize_t
 // numbering of esp32-camera as shipped with arduino-esp32 2.0.x (13 = UXGA). The
@@ -41,6 +41,7 @@
 // driver boundary. Never cast appConfig.camera.frame_size to framesize_t directly.
 #define API_FRAMESIZE_QVGA   5
 #define API_FRAMESIZE_UXGA   13
+#define API_FRAMESIZE_QXGA   17   // 2048x1536, the largest size an OV3660 has
 #define FB_COUNT             2
 #define JPEG_QUALITY_DEFAULT 8
 #define FRAME_SIZE_DEFAULT   13
@@ -203,6 +204,7 @@ struct TelegramSettings {
 struct AuthSettings {
     String http_user = DEFAULT_HTTP_USER;
     String http_pass = DEFAULT_HTTP_PASS;
+    bool stream_auth = false;   // Basic Auth on the stream/snapshot ports (81/82); off so existing consumers keep working
     bool csrf_required = true;  // When true, POST handlers require X-CSRF-Token matching /api/csrf
 };
 

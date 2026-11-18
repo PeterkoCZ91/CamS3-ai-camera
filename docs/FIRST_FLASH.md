@@ -438,9 +438,9 @@ Checks, in order:
 3. **PSRAM.** The boot banner must say `PSRAM: OK (8MB)`. If it says `NOT FOUND`,
    the build flags do not match the board — `qio_opi`,
    `-DCONFIG_SPIRAM_MODE_OCT=1` and `-DBOARD_HAS_PSRAM` must all be present.
-4. **Resolution.** If you set `frame_size` above 13 through the API, the PY260 driver
-   produces nothing (`docs/known_issues.md` §2). Post `{"frame_size": 13}` to
-   `/api/settings`, or factory-reset with `POST /api/reset`.
+4. **Resolution.** A frame size the sensor cannot deliver (the API accepts up to 17,
+   QXGA) can leave the stream empty (`docs/known_issues.md` §2). Post
+   `{"frame_size": 13}` to `/api/settings`, or factory-reset with `POST /api/reset`.
 
 The health watchdog reinits the camera automatically after 30 s with no capture, and
 reboots the device after three failed reinits, so a transient fault self-heals. A

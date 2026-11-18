@@ -430,6 +430,7 @@ static String buildStatusJson() {
 
     // LED
     doc["led_enabled"] = appConfig.led_enabled;
+    doc["stream_auth"] = appConfig.auth.stream_auth;
     doc["active_fps"] = appConfig.active_fps;
     doc["idle_fps"] = appConfig.idle_fps;
 
@@ -688,7 +689,7 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     const int  prevLensFov = appConfig.lens_fov_deg;
     const bool prevLenc    = appConfig.camera.lenc;
     const int  prevSharp   = appConfig.camera.sharpness;
-    if (ok("frame_size", doc["frame_size"].is<int>()))   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], API_FRAMESIZE_QVGA, API_FRAMESIZE_UXGA); needCameraApply = true; }
+    if (ok("frame_size", doc["frame_size"].is<int>()))   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], API_FRAMESIZE_QVGA, API_FRAMESIZE_QXGA); needCameraApply = true; }
     if (ok("jpeg_quality", doc["jpeg_quality"].is<int>())) { appConfig.camera.jpeg_quality = clampInt(doc["jpeg_quality"], 4, 63);  needCameraApply = true; }
     if (ok("vflip", doc["vflip"].is<bool>()))       { appConfig.camera.vflip        = doc["vflip"];         needCameraApply = true; }
     if (ok("hmirror", doc["hmirror"].is<bool>()))     { appConfig.camera.hmirror      = doc["hmirror"];       needCameraApply = true; }
@@ -874,6 +875,7 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     if (ok("lens_ref_fov_deg", doc["lens_ref_fov_deg"].is<int>())) { appConfig.lens_ref_fov_deg = clampInt(doc["lens_ref_fov_deg"], 0, 220); needSave = true; }
 
     // LED
+    if (ok("stream_auth", doc["stream_auth"].is<bool>())) { appConfig.auth.stream_auth = doc["stream_auth"]; needSave = true; }
     if (ok("led_enabled", doc["led_enabled"].is<bool>())) { appConfig.led_enabled = doc["led_enabled"]; needSave = true; }
 
     // Frame rates

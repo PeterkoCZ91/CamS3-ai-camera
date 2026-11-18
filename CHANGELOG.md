@@ -5,6 +5,13 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 
 ## [Unreleased]
 
+### Added
+- **QXGA (2048x1536)** is selectable. It holds ~11 fps at JPEG quality 12 on core 3.3.9 with an OV3660; the 2.0.x driver could not sustain anything above UXGA. The ring slots grew from 256 kB to 512 kB (3 x 512 kB PSRAM) so a large frame is no longer dropped as oversize.
+- **Optional login for the stream and snapshot ports** (`stream_auth`, Settings > Security). Off by default so Home Assistant / A12 keep working; when on, HTTP Basic with the admin credentials is required.
+
+### Changed
+- Six task stacks (motion, person, telegram, mqtt, timelapse, focus) live in PSRAM and every flash write/read from them goes through one small worker task. Free internal heap rose from ~70 kB to ~100 kB, largest block from ~31 kB to ~55 kB.
+
 ## [2.2.0] — 2026-11-18
 
 Moves the firmware from arduino-esp32 2.0.17 / ESP-IDF 4.4 to arduino-esp32 3.3.9 /

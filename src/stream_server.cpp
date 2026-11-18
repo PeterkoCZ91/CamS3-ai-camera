@@ -7,8 +7,41 @@
 #include <lwip/sockets.h>
 #include <errno.h>
 #include "esp_heap_caps.h"
+#include <mbedtls/base64.h>
+#include <strings.h>
 
 static const char* TAG = "StreamSrv";
+
+// Optional HTTP Basic Auth (appConfig.auth.stream_auth, off by default so existing
+// consumers keep working). Same credentials as the admin UI. Compared in constant
+// time; with no/empty configured credentials it falls back to the defaults, like the
+// web server's requireAuth().
+static bool streamAuthorized(httpd_req_t* req) {
+    if (!appConfig.auth.stream_auth) return true;
+    String user = appConfig.auth.http_user.length() ? appConfig.auth.http_user : String(DEFAULT_HTTP_USER);
+    String pass = appConfig.auth.http_pass.length() ? appConfig.auth.http_pass : String(DEFAULT_HTTP_PASS);
+    String want = user + ":" + pass;
+    char hdr[200];
+    bool ok = false;
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) == ESP_OK &&
+        strncasecmp(hdr, "Basic ", 6) == 0) {
+        unsigned char dec[130];
+        size_t outLen = 0;
+        if (mbedtls_base64_decode(dec, sizeof(dec) - 1, &outLen,
+                                  (const unsigned char*)hdr + 6, strlen(hdr + 6)) == 0 &&
+            outLen == (size_t)want.length()) {
+            unsigned char diff = 0;
+            for (size_t i = 0; i < outLen; i++) diff |= dec[i] ^ (unsigned char)want[i];
+            ok = (diff == 0);
+        }
+    }
+    if (!ok) {
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"cams3\"");
+        httpd_resp_send(req, "Authentication required", HTTPD_RESP_USE_STRLEN);
+    }
+    return ok;
+}
 
 // Two servers, because esp_http_server runs every handler on one thread and an
 // MJPEG handler never returns while its client watches. One server per port means
@@ -52,6 +85,7 @@ static void routeClientDisconnected(const StreamRouteConfig* cfg) {
 static esp_err_t streamHandler(httpd_req_t* req) {
     StreamRouteConfig* cfg = (StreamRouteConfig*)req->user_ctx;
     if (!cfg) cfg = &guiStreamConfig;
+    if (!streamAuthorized(req)) return ESP_OK;
 
     if (getRouteClientCount(cfg) >= cfg->maxClients) {
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -198,6 +232,7 @@ static esp_err_t snapshotHandler(httpd_req_t* req) {
         return res;
     }
 
+    if (!streamAuthorized(req)) return ESP_OK;
     camera_fb_t* fb = captureFrame();
     if (!fb) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Capture failed");

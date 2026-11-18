@@ -104,6 +104,8 @@
             'settings.security.pass': 'New password (min. 4 chars)',
             'settings.security.pass.hint': 'After change you will need the new password on next login.',
             'settings.security.pass.placeholder': 'Leave empty to keep current',
+            'settings.security.stream_auth': 'Require login for live stream and snapshot (ports 81/82)',
+            'settings.security.stream_auth.hint': 'Off by default. When on, Home Assistant, A12 and other consumers must send the admin user and password (HTTP Basic).',
             'settings.perf.active_fps': 'FPS while streaming',
             'settings.perf.idle_fps': 'Idle FPS',
             'settings.perf.idle_fps.hint': 'Lower = less power, slower detection',
@@ -430,6 +432,8 @@
             'settings.security.pass': 'Nové heslo (min. 4 znaky)',
             'settings.security.pass.hint': 'Po změně budete při dalším přihlášení potřebovat nové heslo.',
             'settings.security.pass.placeholder': 'Prázdné = ponechat stávající',
+            'settings.security.stream_auth': 'Vyžadovat přihlášení pro živý přenos a snímek (porty 81/82)',
+            'settings.security.stream_auth.hint': 'Ve výchozím stavu vypnuto. Po zapnutí musí Home Assistant, A12 a další odběratelé posílat jméno a heslo správce (HTTP Basic).'
             'settings.perf.active_fps': 'FPS při streamování',
             'settings.perf.idle_fps': 'FPS v klidovém režimu',
             'settings.perf.idle_fps.hint': 'Nižší = menší spotřeba, pomalejší detekce',

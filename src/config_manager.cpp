@@ -248,7 +248,7 @@ static bool validName(const String& s, bool topic) {
 void sanitizeConfig() {
     CfgLock lock;
     AppConfig& c = appConfig;
-    c.camera.frame_size   = sClampI(c.camera.frame_size, API_FRAMESIZE_QVGA, API_FRAMESIZE_UXGA);
+    c.camera.frame_size   = sClampI(c.camera.frame_size, API_FRAMESIZE_QVGA, API_FRAMESIZE_QXGA);
     c.camera.jpeg_quality = sClampI(c.camera.jpeg_quality, 4, 63);
     c.camera.brightness   = sClampI(c.camera.brightness, -2, 2);
     c.camera.contrast     = sClampI(c.camera.contrast, -2, 2);
@@ -471,6 +471,7 @@ bool loadConfig() {
     // An empty user in config.json used to disable authentication entirely.
     if (appConfig.auth.http_user.length() == 0) appConfig.auth.http_user = DEFAULT_HTTP_USER;
     appConfig.auth.csrf_required = doc["auth"]["csrf_required"]  | true;
+    appConfig.auth.stream_auth   = doc["auth"]["stream_auth"]    | false;
 
     // Misc
     appConfig.led_enabled = doc["led_enabled"] | true;
@@ -597,6 +598,7 @@ bool saveConfig() {
     JsonObject auth = doc["auth"].to<JsonObject>();
     auth["user"]          = appConfig.auth.http_user;
     auth["csrf_required"] = appConfig.auth.csrf_required;
+    auth["stream_auth"]   = appConfig.auth.stream_auth;
 
     // Misc
     doc["led_enabled"] = appConfig.led_enabled;

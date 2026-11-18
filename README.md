@@ -622,10 +622,11 @@ or MQTT. There is no cloud service, no telemetry and no phone-home.
 
 **What is not — read this before exposing the device:**
 
-- **The MJPEG streams on ports 81 and 82 are unauthenticated.** `/stream`,
+- **The MJPEG streams on ports 81 and 82 are unauthenticated by default.** `/stream`,
   `/detection-stream` and `/snapshot` run on separate `esp_http_server` instances with
-  no auth check and `Access-Control-Allow-Origin: *` — anyone who can reach either
-  port can watch the camera.
+  `Access-Control-Allow-Origin: *`; anyone who can reach either port can watch the
+  camera. Enable **Settings > Security > Require login for live stream** (`stream_auth`)
+  to demand HTTP Basic with the admin credentials; consumers such as A12 then need them.
 - **The WebSocket `/ws` is unauthenticated.** Browsers forward cached Basic Auth to
   a WS upgrade inconsistently (Safari omits it), which left the UI stuck at
   "Connecting…" after a successful login. The broadcast carries only non-secret

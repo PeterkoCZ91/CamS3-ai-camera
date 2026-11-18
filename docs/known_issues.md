@@ -8,7 +8,7 @@ trade-off you also want to make.
 Contents:
 
 1. [Face detection is disabled in the default build](#1-face-detection-is-disabled-in-the-default-build)
-2. [Resolutions above UXGA do not work](#2-resolutions-above-uxga-do-not-work)
+2. [Resolutions above QXGA are not offered](#2-resolutions-above-qxga-are-not-offered)
 3. [Streams and the WebSocket have no authentication](#3-streams-and-the-websocket-have-no-authentication)
 4. [Telegram TLS does not validate the server certificate](#4-telegram-tls-does-not-validate-the-server-certificate)
 5. [Gallery previews are full-size JPEGs](#5-gallery-previews-are-full-size-jpegs)
@@ -112,49 +112,28 @@ FOMO face model exists, face detection is simply unavailable there.
 
 ---
 
-## 2. Resolutions above UXGA do not work
+## 2. Resolutions above QXGA are not offered
 
-The sensor is documented as a 5 MP PY260 (one tested unit reported OV3660, PID 0x3660) and `POST /api/settings` clamps `frame_size` to
-`FRAMESIZE_QVGA` … `FRAMESIZE_UXGA`, i.e. **5 … 13** (QVGA … UXGA 1600×1200);
-14–21 are rejected by the clamp because a persisted one can boot-loop the device
-(a value already stored in an old `/config.json` is not touched by this change).
-The settings page offers nothing above 13:
+`POST /api/settings` clamps `frame_size` to `FRAMESIZE_QVGA` … `FRAMESIZE_QXGA`, i.e.
+**5 … 17** (the API numbering is the 2.0.x `framesize_t`, see `include/config.h`).
+QXGA (2048×1536) is the largest size an OV3660 has; it was tested on core 3.3.9 at
+JPEG quality 12 and holds ~11 fps with no capture errors. The ring slots are 512 kB
+(`MAX_FRAME_SIZE`) so such a frame is not dropped as oversize.
 
-```
-5  QVGA  320x240      10 XGA  1024x768
-6  CIF   400x296      11 HD   1280x720
-8  VGA   640x480      12 SXGA 1280x1024
-9  SVGA  800x600      13 UXGA 1600x1200   <- default, FRAME_SIZE_DEFAULT
-```
+Sizes 18–21 (QHD, WQXGA, P_FHD, QSXGA) stay blocked: they belong to the 5 MP PY260
+and were never tested on this driver, and a persisted bad value can boot-loop the
+device. The old 2.0.17 driver produced 0 fps above UXGA; that limit is gone.
 
-### Why
-
-Above UXGA the PY260 driver in arduino-esp32 2.0.x could not sustain capture — you
-got 0 fps and a stream of `esp_camera_fb_get()` errors, not a slow-but-working stream.
-The firmware now runs on arduino-esp32 3.3.x (§12), whose camera driver is newer;
-whether that lifts the limit has not been tested yet, so the clamp stays.
-The note is in `include/config.h`:
-
-> `FRAMESIZE_UXGA (1600x1200)` — QSXGA is sensor-max but the PY260 driver in
-> arduino-esp32 2.0.17 can't sustain capture at that size (0 fps, errors).
-
-The API clamp is intentionally looser than the UI so the limit lives in one place
-(the driver) rather than being enforced twice. If you set `frame_size: 18` through
-the API you will get a camera that produces nothing until you set it back — the
-health watchdog will notice the capture stall and reinit, then reboot after three
-failed recoveries.
-
-Note that the decode buffers throughout the firmware **are** sized for QSXGA
-(`IMG_SRC_MAX_W/H` in `include/image_utils.h`), so a large frame cannot overflow a
-detector's buffer. The limitation is throughput, not memory safety.
-
----
+Caveats of the large sizes: the on-device motion decode of a QXGA frame takes about
+0.55 s (detection is normally done by A12 from the stream), and each ring slot,
+detection copy buffer and stream copy is bigger, so free PSRAM drops by ~2 MB.
 
 ## 3. Streams and the WebSocket have no authentication
 
-* **Port 81 in full**: `/stream`, `/detection-stream`, `/snapshot`. No Basic Auth,
-  no token, no configuration option to add one. Anyone who can reach TCP 81 can
-  watch the video.
+* **Port 81 in full**: `/stream`, `/detection-stream`, `/snapshot`. Open by default;
+  the setting `stream_auth` (Settings > Security, API `stream_auth`) turns on HTTP
+  Basic with the admin credentials for the streams and snapshot. With it off,
+  anyone who can reach TCP 81 can watch the video.
 * **`/ws` on port 80**: broadcasts a complete `/api/status` document every 2 seconds
   to any client that connects.
 * **A long list of read-only endpoints on port 80**, including `/api/status`,
@@ -167,10 +146,9 @@ does not (no tokens, no passwords).
 
 ### Why
 
-For port 81 it is simply not implemented: the IDF `esp_http_server` handlers in
-`src/stream_server.cpp` register no auth check. Adding Basic Auth there is
-mechanical, but MJPEG consumers vary wildly in whether they can carry credentials,
-and the firmware's own detection consumer would need them too.
+For port 81 the check is optional and off by default: MJPEG consumers vary wildly in
+whether they can carry credentials, and A12's detection consumer would need them too,
+so turning it on is a per-deployment decision.
 
 For `/ws` it is a deliberate trade-off recorded in `setupWebSocket()`: browsers
 inconsistently forward cached Basic Auth to a WebSocket upgrade handshake — Safari

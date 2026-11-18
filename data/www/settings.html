@@ -46,9 +46,11 @@
                             <option value="11">HD (1280x720)</option>
                             <option value="12">SXGA (1280x1024)</option>
                             <option value="13">UXGA (1600x1200)</option>
-                            <!-- 18 is QHD 2560x1440, not FHD (FHD is 14). Sizes above
-                                 UXGA are not sustainable on the PY260 driver — see
-                                 include/config.h — so they are deliberately absent. -->
+                            <option value="17">QXGA (2048x1536)</option>
+                            <!-- 17 = QXGA, the largest size an OV3660 has; it holds
+                                 ~11 fps on core 3.3.9 at quality 12 (ROADMAP item 5).
+                                 18 is QHD 2560x1440, not FHD (FHD is 14); sizes above
+                                 QXGA are not offered. -->
                         </select>
                     </div>
                     <div class="toggle-row">
@@ -441,6 +443,11 @@
                                placeholder="Leave empty to keep current">
                         <small data-i18n="settings.security.pass.hint">After change you will need the new password on next login.</small>
                     </div>
+                    <div class="toggle-row">
+                        <label for="stream_auth" data-i18n="settings.security.stream_auth">Require login for live stream and snapshot (ports 81/82)</label>
+                        <label class="toggle"><input type="checkbox" id="stream_auth"><span class="slider"></span></label>
+                    </div>
+                    <small data-i18n="settings.security.stream_auth.hint">Off by default. When on, Home Assistant, A12 and other consumers must send the admin user and password (HTTP Basic).</small>
                 </div>
             </details>
 
@@ -519,6 +526,7 @@
         setVal('jpeg_quality', d.jpeg_quality);
         setVal('frame_size', d.frame_size);
         setChk('vflip', d.vflip);
+        setChk('stream_auth', d.stream_auth);
         setChk('hmirror', d.hmirror);
         setVal('brightness', d.brightness); updBadge('brightness');
         setVal('contrast', d.contrast); updBadge('contrast');
@@ -603,6 +611,7 @@
             jpeg_quality: getVal('jpeg_quality'),
             frame_size: getVal('frame_size'),
             vflip: getChk('vflip'),
+            stream_auth: getChk('stream_auth'),
             hmirror: getChk('hmirror'),
             brightness: getVal('brightness'),
             contrast: getVal('contrast'),
