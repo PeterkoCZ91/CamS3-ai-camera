@@ -6,6 +6,7 @@
 #include "config.h"
 #include "camera_manager.h"
 #include "wifi_manager.h"
+#include "stream_server.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <esp_task_wdt.h>
@@ -668,7 +669,7 @@ static void handleCommand(const String& cmd, const String& args) {
             htmlEscape(appConfig.wifi.hostname).c_str(),
             getIPAddress().c_str(),
             getIPAddress().c_str(),
-            STREAM_PORT
+            viewerStreamServerRunning() ? VIEWER_STREAM_PORT : STREAM_PORT
         );
         sendTextSync(buf);
     }

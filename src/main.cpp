@@ -530,7 +530,9 @@ void setup() {
     #endif
 
     logCapture("[%s] Boot complete! Access at http://%s\n", TAG, getIPAddress().c_str());
-    logCapture("[%s] Stream at http://%s:%d/stream\n", TAG, getIPAddress().c_str(), STREAM_PORT);
+    logCapture("[%s] Stream at http://%s:%d/stream (analytics: :%d/detection-stream)\n", TAG,
+               getIPAddress().c_str(),
+               viewerStreamServerRunning() ? VIEWER_STREAM_PORT : STREAM_PORT, STREAM_PORT);
 
     #ifdef INCLUDE_OTA
     logCapture("[%s] OTA at http://%s/update\n", TAG, getIPAddress().c_str());

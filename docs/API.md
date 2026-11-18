@@ -21,19 +21,21 @@ console at boot (`Boot complete! Access at http://…`). With mDNS enabled
 | Port | Server | Purpose | Source |
 | --- | --- | --- | --- |
 | 80 (`HTTP_PORT`) | `ESPAsyncWebServer` | JSON API, web UI, WebSocket, OTA | `src/web_server.cpp` |
-| 81 (`STREAM_PORT`) | `esp_http_server` (IDF) | MJPEG streams and a raw snapshot | `src/stream_server.cpp` |
+| 81 (`STREAM_PORT`) | `esp_http_server` (IDF) | MJPEG streams (analytics, legacy viewer) and a raw snapshot | `src/stream_server.cpp` |
+| 82 (`VIEWER_STREAM_PORT`) | `esp_http_server` (IDF) | MJPEG `/stream` for people | `src/stream_server.cpp` |
 
 The split is deliberate: an MJPEG handler blocks its socket for as long as the
 client is connected, so it lives on a separate server with its own task and client
 budget instead of starving the async server that serves the UI.
 
-Port 81 (the streams) sends `Access-Control-Allow-Origin: *`. Port 80 sends **no**
+Ports 81 and 82 (the streams) send `Access-Control-Allow-Origin: *`. Port 80 sends **no**
 CORS headers: the UI is same-origin and A12 is server-side, so a page on another
 origin cannot read the camera's API responses from a browser.
 
 Handler count: **51 on port 80** (44 API/compat routes + 3 captive-portal redirects
 + 3 OTA routes + 1 WebSocket, plus a static-file mount and a 404 fallback) and
-**7 on port 81** — 58 method+path handlers in total.
+**7 on port 81**, plus the 3 `/stream` handlers repeated on port 82 — 61
+method+path handlers in total.
 
 ---
 
@@ -173,7 +175,8 @@ this firmware.
 `GET /a12/status` — a flattened subset for an external integration (see
 [`A12_INTEGRATION.md`](A12_INTEGRATION.md)). `ok` is `true` only when WiFi is connected, at
 least one frame has been captured, and `frame_age_ms < 10000`. It carries
-`stream_url`, `detection_stream_url`, `snapshot_url`, `stream_port`, the capture
+`stream_url` (port 82), `detection_stream_url`, `snapshot_url`, `stream_port` (81),
+`viewer_stream_port` (82, or 81 if the viewer server failed to start), the capture
 counters, camera geometry, and motion/person/MQTT/Telegram/SD flags. Fields absent
 from the build (e.g. person detection) are emitted as `false` / `0` / `"NONE"`
 rather than omitted, so a consumer never has to test for key presence.
@@ -186,7 +189,7 @@ rather than omitted, so a consumer never has to test for key presence.
   "capture_fps": 14.9, "capture_count": 62810, "capture_errors": 0,
   "last_capture_ms": 4210987, "frame_age_ms": 62,
   "active_fps": 15, "idle_fps": 1,
-  "stream_url": "http://<camera-ip>:81/stream",
+  "stream_url": "http://<camera-ip>:82/stream",
   "detection_stream_url": "http://<camera-ip>:81/detection-stream"
 }
 ```
@@ -1094,17 +1097,20 @@ Without `-DINCLUDE_PERSON_DETECT` the live keys are still emitted, as
 
 ---
 
-## 7. Port 81 — streams
+## 7. Ports 81 and 82 — streams
 
 No authentication, no CSRF, no config knob to add either. See section 8.
 
-**One stream client at a time in practice.** The port-81 server is a single
+**One stream client at a time per port.** Each stream server is a single
 `esp_http_server` task and an MJPEG handler holds it for as long as the client
-stays connected, so a second `/stream` or `/detection-stream` connection (and
-`/snapshot`) waits until the first ends. `MAX_STREAM_CLIENTS` (3) and the
-detection cap (2) are upper bounds on the counters, not concurrent capacity. A
-client that vanishes without closing is detected after ~2 s idle by a
-`MSG_PEEK` probe and the handler exits.
+stays connected, so a second connection to the same port waits until the first
+ends. That is why viewers have their own port: A12 keeps `:81/detection-stream`
+open permanently, and `:82/stream` is served by a separate task that it cannot
+block. `:81/stream` still exists for setups that already point at it, but it queues
+behind any open stream on port 81. Port 82 carries only `/stream` (GET, HEAD,
+OPTIONS). `MAX_STREAM_CLIENTS` (3) and the detection cap (2) are upper bounds on
+the counters, not concurrent capacity. A client that vanishes without closing is
+detected after ~2 s idle by a `MSG_PEEK` probe and the handler exits.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -1172,7 +1178,7 @@ ring frame out, releases the slot, then sends (with a 3 s send timeout), or capt
 
 Stated plainly, because it determines where this device may be deployed:
 
-1. **Everything on port 81.** `/stream`, `/detection-stream` and `/snapshot` are
+1. **Everything on ports 81 and 82.** `/stream`, `/detection-stream` and `/snapshot` are
    fully open. Anyone who can reach the port sees the video. There is no
    configuration option to change this — the IDF server registers the handlers with
    no auth check at all.
@@ -1222,7 +1228,7 @@ curl -s $AUTH -X POST $CAM/settings \
 
 # 5. Grab a still, and watch the stream
 curl -s -o frame.jpg $CAM/api/snapshot
-curl -s -N http://<camera-ip>:81/stream --output - | head -c 0   # or open in a browser
+curl -s -N http://<camera-ip>:82/stream --output - | head -c 0   # or open in a browser
 ```
 
 The token survives until the next reboot. A `403` with

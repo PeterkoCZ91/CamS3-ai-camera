@@ -140,8 +140,9 @@ a public Edge Impulse project.
 | URL | What it is |
 |---|---|
 | `http://<camera-ip>/` | web UI |
-| `http://<camera-ip>:81/stream` | MJPEG, GUI role (max 3 clients) |
-| `http://<camera-ip>:81/detection-stream` | MJPEG, analytics role (max 2 clients) |
+| `http://<camera-ip>:82/stream` | MJPEG for viewers (web UI, Home Assistant, VLC) |
+| `http://<camera-ip>:81/detection-stream` | MJPEG, analytics role (A12) |
+| `http://<camera-ip>:81/stream` | same as `:82/stream`, kept for existing setups |
 | `http://<camera-ip>:81/snapshot` | single JPEG |
 | `http://<camera-ip>/update` | ElegantOTA (Basic Auth) |
 | `http://<camera-ip>/log-viewer` | live log, auto-refresh |
@@ -163,7 +164,8 @@ Capture owns core 1 together with the Arduino loop, everything else runs on core
 | `timelapse` | 0 | 2 | 4 kB | interval capture to SD |
 | `telegram` | 0 | 2 | 8 kB | send queue + `getUpdates` polling |
 | `mqtt` | 0 | 2 | 6 kB | broker connection, discovery, telemetry |
-| stream `httpd` | 0 | — | 8 kB | MJPEG server on port 81 |
+| stream `httpd` | 0 | — | 8 kB | MJPEG server on port 81 (analytics, snapshot) |
+| viewer `httpd` | 0 | — | 8 kB | MJPEG server on port 82 (`/stream` for people) |
 | Arduino `loop` | 1 | — | — | Wi-Fi supervision, health watchdog, WebSocket status broadcast |
 
 Every long-running task subscribes to the **task watchdog** (`esp_task_wdt_init(20, true)`,
@@ -176,7 +178,7 @@ copies after the capture** — readers get a raw pointer into a PSRAM slot and
 hold a reference count while they use it.
 
 ```
-   capture task ──▶ [ ring buffer: 3 slots × 256 kB, PSRAM ] ──┬──▶ /stream  :81
+   capture task ──▶ [ ring buffer: 3 slots × 256 kB, PSRAM ] ──┬──▶ /stream  :82 (and :81)
                                                               ├──▶ /detection-stream
                                                               ├──▶ motion ─sem─▶ person
                                                               ├──▶ timelapse → SD
@@ -449,7 +451,8 @@ Auto-discovery publishes **10 entities** under
 
 The device block carries manufacturer, model, `sw_version` and the MAC
 connection, so all ten group under one HA device. There is deliberately **no
-camera entity** — HA should pull the MJPEG stream from port 81 directly.
+camera entity** — HA should pull the MJPEG stream from `:82/stream` directly
+(port 81 is busy whenever an analytics client such as A12 is connected).
 
 Topics (`<base>` = `topic_prefix`, default `cams3`):
 
@@ -619,10 +622,10 @@ or MQTT. There is no cloud service, no telemetry and no phone-home.
 
 **What is not — read this before exposing the device:**
 
-- **The MJPEG streams on port 81 are unauthenticated.** `/stream`,
-  `/detection-stream` and `/snapshot` run on a separate `esp_http_server` with no
-  auth check and `Access-Control-Allow-Origin: *` — anyone who can reach port 81
-  can watch the camera.
+- **The MJPEG streams on ports 81 and 82 are unauthenticated.** `/stream`,
+  `/detection-stream` and `/snapshot` run on separate `esp_http_server` instances with
+  no auth check and `Access-Control-Allow-Origin: *` — anyone who can reach either
+  port can watch the camera.
 - **The WebSocket `/ws` is unauthenticated.** Browsers forward cached Basic Auth to
   a WS upgrade inconsistently (Safari omits it), which left the UI stuck at
   "Connecting…" after a successful login. The broadcast carries only non-secret
@@ -636,7 +639,7 @@ or MQTT. There is no cloud service, no telemetry and no phone-home.
   active man-in-the-middle. MQTT TLS verifies *if* you upload a `/ca.pem`;
   otherwise it falls back to `setInsecure()` too.
 - **Basic Auth over plain HTTP** — base64, not encryption. Empty credentials
-  disable auth entirely. Port 80 sends no CORS headers (port 81 does).
+  disable auth entirely. Port 80 sends no CORS headers (ports 81 and 82 do).
 - **Defaults are weak by design**: `admin` / `admin`, and
   `CamS3-Setup` / `cams3admin` for the setup AP. The firmware warns rather than
   auto-generating, because a user without a UART cable would be locked out.

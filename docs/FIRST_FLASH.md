@@ -504,9 +504,10 @@ Two distinct causes:
 * **First frame takes a second** — expected. `idle_fps` defaults to 1, and the
   handler never sends the same frame twice, so a fresh viewer waits for the next
   capture before the rate climbs to `active_fps` (15).
-* **Nothing at all on port 81** — confirm you are using the right port. Streams live
-  on `http://<camera-ip>:81/stream`, not on port 80. `/api/status` gives you the
-  exact URLs in `stream_url` and `detection_stream_url`.
+* **Nothing at all on port 82** — confirm you are using the right port. The live
+  view is `http://<camera-ip>:82/stream`, not port 80; analytics use
+  `:81/detection-stream`. `/api/status` gives you the exact URLs in `stream_url` and
+  `detection_stream_url`.
 * **After changing the resolution** — `POST /api/settings` answers with
   `"camera_restart": true` when `frame_size` changed, because the driver's DMA
   buffers have to be rebuilt. The stream drops for 1–3 seconds; reconnect.

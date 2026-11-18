@@ -11,6 +11,10 @@ All notable changes to this firmware. Versions follow semantic versioning, where
   (`ENC2`). Older firmware cannot read them: after a downgrade WiFi, the HTTP password,
   MQTT and Telegram credentials have to be entered again.
 
+### Fixed
+- **Black live view while A12 is connected.** The stream server runs every handler on one thread, so A12 holding `:81/detection-stream` left `:81/stream` waiting forever. Viewers now get their own server on **port 82**; `stream_url` in `/api/status`, `/a12/status` and `/stream-stats` points there (and back at port 81 if port 82 could not start). `:81/stream` is unchanged for existing setups. Home Assistant MJPEG cameras should be moved to `:82/stream`.
+- `scheduleReboot()` honours its delay argument.
+
 ### Fixed (code review 2026-11)
 - **Motion events swallowed** when movement restarted inside `cooldown_sec` after the previous event (dead `cooldownExpired` branch); person detection now keeps inferring for 8 s after a motion trigger so the tracker can reach `confirm_hits` inside one event.
 - **Telegram offline queue** no longer deletes queued photos while the network is simply down; every TLS/HTTP client has handshake/connect timeouts and feeds the task watchdog.

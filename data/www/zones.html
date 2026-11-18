@@ -272,7 +272,7 @@
         }
         function setLive(on) {
             if (on) {
-                img.src = streamUrl || (location.protocol + '//' + location.hostname + ':81/stream');
+                img.src = streamUrl || (location.protocol + '//' + location.hostname + ':82/stream');
             } else {
                 // Drop the attribute (not src='') to close the MJPEG connection
                 // without firing a bogus load error for the document URL.

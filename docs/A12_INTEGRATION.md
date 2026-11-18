@@ -63,7 +63,8 @@ also a limitation — see [`known_issues.md`](known_issues.md).
 
 ### Use `/detection-stream`, not `/stream`
 
-There are two MJPEG routes on port 81 and they are not interchangeable:
+There are two MJPEG routes on port 81 and they are not interchangeable (people
+watching the camera use `:82/stream`, a separate server A12 cannot block):
 
 - The detection route has its own client counter (`detection_clients`), so the camera
   can tell an automated consumer apart from someone watching the dashboard.

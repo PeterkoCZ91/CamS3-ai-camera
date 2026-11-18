@@ -164,7 +164,7 @@
     function init() {
         // Fallback only — updateUI() replaces this with stream_url from the device,
         // which is what works behind a reverse proxy or on a non-default port.
-        streamUrl = location.protocol + '//' + location.hostname + ':81/stream';
+        streamUrl = location.protocol + '//' + location.hostname + ':82/stream';
         connectWebSocket();
         fetchStatus();
         statusPollTick();

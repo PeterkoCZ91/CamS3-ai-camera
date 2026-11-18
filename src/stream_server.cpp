@@ -10,7 +10,13 @@
 
 static const char* TAG = "StreamSrv";
 
-static httpd_handle_t stream_httpd = NULL;
+// Two servers, because esp_http_server runs every handler on one thread and an
+// MJPEG handler never returns while its client watches. One server per port means
+// one stream per port: A12 holding /detection-stream on STREAM_PORT used to leave a
+// browser on /stream with a black picture. The viewer port is for people, the
+// stream port stays as it was for analytics and for anything already pointed at it.
+static httpd_handle_t stream_httpd = NULL;   // STREAM_PORT: /detection-stream, /stream, /snapshot
+static httpd_handle_t viewer_httpd = NULL;   // VIEWER_STREAM_PORT: /stream only
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
@@ -229,43 +235,52 @@ static esp_err_t streamHeadHandler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-static void registerStreamRoute(const StreamRouteConfig* cfg) {
+static void registerStreamRoute(httpd_handle_t server, const StreamRouteConfig* cfg) {
     httpd_uri_t get_uri = {
         .uri = cfg->path, .method = HTTP_GET,
         .handler = streamHandler, .user_ctx = (void*)cfg
     };
-    httpd_register_uri_handler(stream_httpd, &get_uri);
+    httpd_register_uri_handler(server, &get_uri);
 
     httpd_uri_t opts_uri = {
         .uri = cfg->path, .method = HTTP_OPTIONS,
         .handler = corsHandler, .user_ctx = NULL
     };
-    httpd_register_uri_handler(stream_httpd, &opts_uri);
+    httpd_register_uri_handler(server, &opts_uri);
 
     httpd_uri_t head_uri = {
         .uri = cfg->path, .method = HTTP_HEAD,
         .handler = streamHeadHandler, .user_ctx = (void*)cfg
     };
-    httpd_register_uri_handler(stream_httpd, &head_uri);
+    httpd_register_uri_handler(server, &head_uri);
 }
 
-bool streamServerInit() {
+static httpd_handle_t startStreamHttpd(uint16_t port, uint16_t maxSockets) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = STREAM_PORT;
-    config.ctrl_port = STREAM_PORT + 1;
+    config.server_port = port;
+    // Every instance needs its own control port; derive it from the HTTP port so
+    // two servers can never collide.
+    config.ctrl_port = 32768 + port;
+    config.max_open_sockets = maxSockets;
     config.max_uri_handlers = 12;
     config.stack_size = 8192;
     config.core_id = 0;
 
-    logCapture("[%s] Starting stream server on port %d\n", TAG, STREAM_PORT);
-
-    if (httpd_start(&stream_httpd, &config) != ESP_OK) {
-        logCapture("[%s] Failed to start stream server\n", TAG);
-        return false;
+    httpd_handle_t handle = NULL;
+    logCapture("[%s] Starting stream server on port %d\n", TAG, port);
+    if (httpd_start(&handle, &config) != ESP_OK) {
+        logCapture("[%s] Failed to start stream server on port %d\n", TAG, port);
+        return NULL;
     }
+    return handle;
+}
 
-    registerStreamRoute(&guiStreamConfig);
-    registerStreamRoute(&detectionStreamConfig);
+bool streamServerInit() {
+    stream_httpd = startStreamHttpd(STREAM_PORT, 7);
+    if (!stream_httpd) return false;
+
+    registerStreamRoute(stream_httpd, &guiStreamConfig);
+    registerStreamRoute(stream_httpd, &detectionStreamConfig);
 
     // /snapshot on stream port too.
     httpd_uri_t snap_uri = {
@@ -274,11 +289,24 @@ bool streamServerInit() {
     };
     httpd_register_uri_handler(stream_httpd, &snap_uri);
 
+    // A failed viewer server is not fatal: analytics keep working and the GUI
+    // falls back to STREAM_PORT through stream_url.
+    viewer_httpd = startStreamHttpd(VIEWER_STREAM_PORT, MAX_STREAM_CLIENTS + 1);
+    if (viewer_httpd) registerStreamRoute(viewer_httpd, &guiStreamConfig);
+
     logCapture("[%s] Stream server started\n", TAG);
     return true;
 }
 
+bool viewerStreamServerRunning() {
+    return viewer_httpd != NULL;
+}
+
 void streamServerStop() {
+    if (viewer_httpd) {
+        httpd_stop(viewer_httpd);
+        viewer_httpd = NULL;
+    }
     if (stream_httpd) {
         httpd_stop(stream_httpd);
         stream_httpd = NULL;

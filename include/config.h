@@ -9,7 +9,8 @@
 
 // HTTP ports
 #define HTTP_PORT       80
-#define STREAM_PORT     81
+#define STREAM_PORT     81   // analytics (/detection-stream), /snapshot, legacy /stream
+#define VIEWER_STREAM_PORT 82  // /stream for browsers, so it never waits behind A12
 
 // Default AP credentials
 #define DEFAULT_AP_SSID    "CamS3-Setup"

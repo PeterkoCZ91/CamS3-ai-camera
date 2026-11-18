@@ -410,12 +410,14 @@ is no language setting today.
 
 Things that are limits rather than bugs, worth knowing before you file an issue.
 
-**One MJPEG client at a time on port 81.** The stream server is a single
-`esp_http_server` task; an open `/stream` or `/detection-stream` connection occupies
-it, so further stream or `/snapshot` requests on port 81 wait until it closes. The
-client caps (3 / 2) only bound the counters. A dropped peer is noticed after ~2 s
-idle (socket `MSG_PEEK` probe); use port 80 `/api/snapshot` for stills while a stream
-is open.
+**One MJPEG client at a time per stream port.** Each stream server is a single
+`esp_http_server` task; an open stream occupies it, so further requests on that port
+wait until it closes. That is why there are two: analytics (A12) hold
+`:81/detection-stream`, people watch `:82/stream`, and neither waits for the other.
+A second viewer on port 82 still waits for the first. `:81/stream` remains for
+existing setups but queues behind A12 — point viewers at `stream_url` from
+`/api/status`, which names port 82. A dropped peer is noticed after ~2 s idle (socket
+`MSG_PEEK` probe); use port 80 `/api/snapshot` for stills while a stream is open.
 
 **Telegram silent mode is lost on reboot.** `/ticho <minutes>` suppresses
 notifications until a `millis()` deadline held in RAM only. This is intentional: a

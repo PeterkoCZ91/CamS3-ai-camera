@@ -15,7 +15,7 @@ This firmware is designed for a **trusted LAN or an isolated camera VLAN**. It i
 hardened for direct exposure to the internet, and it should not be port-forwarded.
 Concretely:
 
-- The MJPEG streams on port 81 (`/stream`, `/detection-stream`) have **no
+- The MJPEG streams on ports 81 and 82 (`/stream`, `/detection-stream`) have **no
   authentication**. Anyone who can reach the port can watch the camera.
 - The WebSocket at `/ws` has no authentication. It carries status only (uptime, heap,
   detection flags) — no credentials — but it does reveal that the camera exists and

@@ -4,6 +4,7 @@
 #include "wifi_manager.h"
 #include "board_config.h"
 #include "lens_profiles.h"
+#include "stream_server.h"
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
@@ -226,6 +227,13 @@ static String streamBaseUrl() {
     return httpBaseUrl() + ":" + String(STREAM_PORT);
 }
 
+// Where people watch. A browser on STREAM_PORT queues behind whatever stream that
+// server is already sending (A12 holds it permanently), so viewers get their own.
+static String viewerStreamUrl() {
+    uint16_t port = viewerStreamServerRunning() ? VIEWER_STREAM_PORT : STREAM_PORT;
+    return httpBaseUrl() + ":" + String(port) + "/stream";
+}
+
 // Name the fitted sensor from the PID the driver actually read. A hard-coded
 // "PY260" was wrong on a unit that reports 0x3660 (OV3660) — the board is documented
 // with a PY260, but the chip on a given unit is what the sensor says it is.
@@ -284,7 +292,7 @@ static String buildStatusJson() {
     doc["stream_clients"] = streamClients;
     doc["detection_clients"] = detectionClients;
     doc["total_stream_clients"] = streamClients + detectionClients;
-    doc["stream_url"] = streamBaseUrl() + "/stream";
+    doc["stream_url"] = viewerStreamUrl();
     doc["detection_stream_url"] = streamBaseUrl() + "/detection-stream";
     doc["snapshot_url"] = httpBaseUrl() + "/frame";
 
@@ -1002,13 +1010,13 @@ static void handleApiWifi(AsyncWebServerRequest* request, uint8_t* data, size_t 
 }
 
 // Helper: schedule a reboot from a throwaway FreeRTOS task (keeps async handler responsive).
-static void scheduleRebootTask(void*) {
-    vTaskDelay(pdMS_TO_TICKS(500));
+// The delay travels in the task parameter: the reply has to leave before the restart.
+static void scheduleRebootTask(void* arg) {
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)(uintptr_t)arg));
     ESP.restart();
 }
 static void scheduleReboot(uint32_t delayMs = 500) {
-    (void)delayMs;
-    xTaskCreate(scheduleRebootTask, "reboot", 2048, NULL, 1, NULL);
+    xTaskCreate(scheduleRebootTask, "reboot", 2048, (void*)(uintptr_t)delayMs, 1, NULL);
 }
 
 // API: GET /api/wifi/scan
@@ -1725,7 +1733,7 @@ static void handleStreamStats(AsyncWebServerRequest* request) {
     doc["frame_age_ms"] = getFrameAgeMs();
     doc["active_fps"] = appConfig.active_fps;
     doc["idle_fps"] = appConfig.idle_fps;
-    doc["stream_url"] = streamBaseUrl() + "/stream";
+    doc["stream_url"] = viewerStreamUrl();
     doc["detection_stream_url"] = streamBaseUrl() + "/detection-stream";
     String result;
     serializeJson(doc, result);
@@ -1745,12 +1753,13 @@ static void handleA12Status(AsyncWebServerRequest* request) {
     doc["wifi_rssi"] = getRSSI();
     doc["uptime_sec"] = millis() / 1000;
 
-    doc["stream_url"] = streamBaseUrl() + "/stream";
+    doc["stream_url"] = viewerStreamUrl();
     doc["detection_stream_url"] = streamBaseUrl() + "/detection-stream";
     doc["snapshot_url"] = httpBaseUrl() + "/frame";
     int streamClients = getStreamClientCount();
     int detectionClients = getDetectionStreamClientCount();
     doc["stream_port"] = STREAM_PORT;
+    doc["viewer_stream_port"] = viewerStreamServerRunning() ? VIEWER_STREAM_PORT : STREAM_PORT;
     doc["stream_clients"] = streamClients;
     doc["detection_clients"] = detectionClients;
     doc["total_stream_clients"] = streamClients + detectionClients;
