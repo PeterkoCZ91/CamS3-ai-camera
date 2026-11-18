@@ -1,7 +1,7 @@
 # CamS3 5MP Advanced Camera Firmware
 
 [![Build](https://github.com/PeterkoCZ91/CamS3-ai-camera/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/PeterkoCZ91/CamS3-ai-camera/actions/workflows/build.yml)
-[![Firmware version](https://img.shields.io/badge/firmware-v2.2.0-2ea44f)](CHANGELOG.md)
+[![Firmware version](https://img.shields.io/badge/firmware-v2.3.0-2ea44f)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/github/license/PeterkoCZ91/CamS3-ai-camera)](LICENSE)
 
 [![Hardware: M5Stack Unit CamS3 5MP](https://img.shields.io/badge/hardware-M5Stack%20Unit%20CamS3%205MP-orange)](https://docs.m5stack.com/en/unit/Unit-CAMS3%205MP)
@@ -666,7 +666,7 @@ automatically (`0` = off). See [`docs/API.md`](docs/API.md).
 | Item | State |
 |---|---|
 | Face detection | Off by default. `HumanFaceDetectMSR01` comes from esp-dl's deprecated `dl_lib` API — arduino-esp32 removed those headers in v3.1+, so it cannot be built on the arduino-esp32 3.3.x core this firmware now uses (the flag stops at an `#error`) — and it cost ~660 kB of flash. A `LoadStoreError` panic was also observed on this hardware with it enabled; see [`docs/known_issues.md`](docs/known_issues.md) for the signature and what is and is not verified. Code kept for a future port. Migration target: a FOMO face model. |
-| Capture resolution | The sensor is 5 MP, but the firmware runs UXGA 1600×1200 (`frame_size 13`). The PY260 driver in the Arduino core cannot sustain capture at QSXGA — it yields 0 fps and errors. Decode buffers are nevertheless sized for QSXGA/8 so no `frame_size` can overflow them. |
+| Capture resolution | The sensor is 5 MP; UXGA 1600×1200 (`frame_size 13`) is the default, and QXGA 2048×1536 (`frame_size 17`) is selectable since v2.3.0 (~11 fps, 512 kB ring slots). QSXGA remains blocked due to driver limitations. |
 | Audio | The PDM microphone pins are in `board_config.h`, but there is no I²S code. `/audio-status` returns `available: false`. |
 | Sibling-API gaps | Compared with the DFR1154 firmware, `/sd-clear`, `/sd-log`, `/wifi-save`, RTSP and audio are not implemented. For A12 set `AUDIO_ENABLED=false` and `camera_profiles.apply_from_a12=false` (`ambient_light_lux` is frame brightness, not lux). |
 | AVI recording | `AviWriter` (RIFF/AVI 1.0 MJPEG muxer) is implemented and unit-clean, but nothing calls it. `POST /record` returns HTTP 501. `INCLUDE_AVI_WRITER` currently has no effect. |
@@ -683,8 +683,8 @@ filesystem was not re-flashed after the partition table shrank: run
 `pio run -t uploadfs`. `LittleFS.begin(true)` formats on the second attempt, which
 loses the config JSON and the event log — the NVS secrets survive.
 
-**Camera init fails / 0 fps.** Check `frame_size`: QXGA and QSXGA are unstable with
-this sensor driver, so stay at UXGA (13) or below. The boot log prints the sensor
+**Camera init fails / 0 fps.** Check `frame_size`: sizes above QXGA (17) are unstable with
+this sensor driver, so stay at QXGA or below. The boot log prints the sensor
 PID — `0x0000` means the SCCB bus is not answering, usually a reseated flex cable.
 
 **Motion fires constantly.** Raise `threshold` and `min_area_pct`, keep both

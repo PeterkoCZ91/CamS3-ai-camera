@@ -1,5 +1,7 @@
 # PlatformIO build output and downloaded dependencies
 .pio/
+src/idf_component.yml
+managed_components/
 
 # Editor / tooling
 .vscode/

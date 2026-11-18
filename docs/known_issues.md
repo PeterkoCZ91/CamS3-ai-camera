@@ -15,7 +15,7 @@ Contents:
 6. [AVI recording is not wired up](#6-avi-recording-is-not-wired-up)
 7. [Stubbed endpoints for hardware this board does not have](#7-stubbed-endpoints-for-hardware-this-board-does-not-have)
 8. [The person detection model is not in this repository](#8-the-person-detection-model-is-not-in-this-repository)
-9. [Frames larger than 256 kB are dropped](#9-frames-larger-than-256-kb-are-dropped)
+9. [Frames larger than 512 kB are dropped](#9-frames-larger-than-512-kb-are-dropped)
 10. [Notification text is Czech only](#10-notification-text-is-czech-only)
 11. [Smaller deliberate constraints](#11-smaller-deliberate-constraints)
 12. [Toolchain: arduino-esp32 3.3.x, face detection unavailable](#12-toolchain-arduino-esp32-33x-face-detection-unavailable)
@@ -341,20 +341,22 @@ is in this repository.
 
 ---
 
-## 9. Frames larger than 256 kB are dropped
+## 9. Frames larger than 512 kB are dropped
 
-`MAX_FRAME_SIZE` in `src/camera_manager.cpp` is 256 kB per ring-buffer slot
-(3 slots, PSRAM). The capture task publishes a frame only `if (fb->len <=
-MAX_FRAME_SIZE)`. An oversized frame is skipped and counted in
-`ringDroppedFrames` (`ring_dropped` in `/api/status` and `/health`, with
-`ring_oversize` for the oversized subset); the first and every 50th are logged and
-`/health` raises `frames being dropped` while the counter grows. The same counter
-also covers the case where every slot is held by a reader.
+`MAX_FRAME_SIZE` in `src/camera_manager.cpp` is 512 kB per ring-buffer slot
+(3 slots, PSRAM; raised from 256 kB in v2.3.0 to support QXGA and high-detail UXGA).
+The capture task publishes a frame only `if (fb->len <= MAX_FRAME_SIZE)`. An
+oversized frame is skipped and counted in `ringDroppedFrames` (`ring_dropped` in
+`/api/status` and `/health`, with `ring_oversize` for the oversized subset); the
+first and every 50th are logged and `/health` raises `frames being dropped` while
+the counter grows. The same counter also covers the case where every slot is
+held by a reader.
 
 ### When it bites
 
-UXGA (1600×1200) at `jpeg_quality` 4–6 on a detailed, well-lit scene. The symptom is
-a stream that stutters or freezes and a `capture_fps` that stays healthy, because
+Extreme resolution/quality combinations (e.g. QXGA 2048×1536 or UXGA 1600×1200 at
+very high JPEG quality like 2–4 on a detailed, high-contrast scene). The symptom is
+a stream that stutters or freezes while `capture_fps` stays healthy, because
 capture *is* working — the frames just never reach the ring buffer, and every
 consumer (both MJPEG streams, all three detectors, `/api/snapshot`, timelapse,
 `/save_frame`) reads exclusively from the ring.
@@ -362,9 +364,9 @@ consumer (both MJPEG streams, all three detectors, `/api/snapshot`, timelapse,
 ### Workaround
 
 Raise `jpeg_quality` (numerically higher = more compression = smaller frames). The
-default of 8 keeps UXGA frames comfortably under the limit. If you need both UXGA
-and quality 4, raise `MAX_FRAME_SIZE` — the cost is 3 × the increase in PSRAM, of
-which there are 8 MB.
+default of 8 keeps UXGA frames comfortably under the limit, and QXGA at quality 12
+fits with ample headroom. If you need even larger frames, you can raise `MAX_FRAME_SIZE`
+further — the cost is 3 × the increase in PSRAM, of which there are 8 MB.
 
 ---
 

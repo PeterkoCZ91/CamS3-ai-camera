@@ -433,7 +433,7 @@
             'settings.security.pass.hint': 'Po změně budete při dalším přihlášení potřebovat nové heslo.',
             'settings.security.pass.placeholder': 'Prázdné = ponechat stávající',
             'settings.security.stream_auth': 'Vyžadovat přihlášení pro živý přenos a snímek (porty 81/82)',
-            'settings.security.stream_auth.hint': 'Ve výchozím stavu vypnuto. Po zapnutí musí Home Assistant, A12 a další odběratelé posílat jméno a heslo správce (HTTP Basic).'
+            'settings.security.stream_auth.hint': 'Ve výchozím stavu vypnuto. Po zapnutí musí Home Assistant, A12 a další odběratelé posílat jméno a heslo správce (HTTP Basic).',
             'settings.perf.active_fps': 'FPS při streamování',
             'settings.perf.idle_fps': 'FPS v klidovém režimu',
             'settings.perf.idle_fps.hint': 'Nižší = menší spotřeba, pomalejší detekce',

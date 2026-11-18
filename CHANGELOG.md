@@ -5,12 +5,20 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-11-20
+
+Upgrade over the air needs the **filesystem image** too (the settings page gained two
+controls), which resets `config.json` to defaults: note your settings first.
+
 ### Added
 - **QXGA (2048x1536)** is selectable. It holds ~11 fps at JPEG quality 12 on core 3.3.9 with an OV3660; the 2.0.x driver could not sustain anything above UXGA. The ring slots grew from 256 kB to 512 kB (3 x 512 kB PSRAM) so a large frame is no longer dropped as oversize.
 - **Optional login for the stream and snapshot ports** (`stream_auth`, Settings > Security). Off by default so Home Assistant / A12 keep working; when on, HTTP Basic with the admin credentials is required.
 
 ### Changed
 - Six task stacks (motion, person, telegram, mqtt, timelapse, focus) live in PSRAM and every flash write/read from them goes through one small worker task. Free internal heap rose from ~70 kB to ~100 kB, largest block from ~31 kB to ~55 kB.
+
+### Verified
+- 24-hour continuous soak test completed: 288/288 samples reachable (100%), 0 panics, 0 WDT resets, 0 restarts, average ~98.8 kB internal free heap, zero memory leak, average 10.69 FPS (live uptime >40 h).
 
 ## [2.2.0] — 2026-11-18
 

@@ -11,11 +11,8 @@ The port to pioarduino 55.03.39 (arduino-esp32 3.3.9 / ESP-IDF 5.5.4) shipped in
 internal RAM. Measured on a camera, free internal heap fell from ~103 kB (2.1.0) to
 ~70 kB and the largest free block from ~85 kB to ~30 kB.
 
-1. **Win internal RAM back in our own code.** Move task stacks that never touch
-   flash to PSRAM (`xTaskCreatePinnedToCoreWithCaps`, allowed by
-   `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY`), and audit the other internal
-   allocations. Done when a Telegram photo and an MQTT-over-TLS publish succeed
-   reliably for 24 h.
+1. **(done in 2.3.0, 24 h soak passed) Win internal RAM back in our own code.** Result: free internal heap ~100 kB (24 h soak avg 98.8 kB, 0 panics, 0 reboots, uptime >40 h), largest block ~55 kB.
+   Task stacks for motion, person, Telegram, MQTT, timelapse and focus now reside in PSRAM with flash I/O routed through a dedicated worker task.
 2. **Fallback: hybrid compile.** Rebuilding the core with
    `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` (`custom_sdkconfig`) was tried and
    measured at 86-93 kB heap / 41-49 kB largest block. It was not shipped because
@@ -24,13 +21,8 @@ internal RAM. Measured on a camera, free internal heap fell from ~103 kB (2.1.0)
 
 ## Phase 1: things the new core may already fix (cheap to check)
 
-5. **(done, unreleased) Re-test resolutions above UXGA (§2).** QXGA works: ~11 fps, no errors, clamp widened to 17 and ring slots 512 kB. Original plan: **Re-test resolutions above UXGA (§2).** The limit came from the 2.0.17
-   camera driver; 3.3.9 ships esp32-camera 2.1.6. Try QXGA/QSXGA with
-   `jpeg_quality` 10-12 for 30 min. If capture holds, widen the clamp and the
-   settings page. Watch the 256 kB ring-slot limit (§9) at the same time.
-6. **(done, unreleased: fixed 512 kB slots) Frame size vs ring slot (§9).** If larger frames become usable, size
-   `MAX_FRAME_SIZE` from the selected frame size instead of a fixed 256 kB
-   (PSRAM has room: 3 slots x 512 kB = 1.5 MB of 8 MB).
+5. **(done in 2.3.0) Re-test resolutions above UXGA (§2).** QXGA works: ~11 fps, no errors, clamp widened to 17 and ring slots 512 kB.
+6. **(done in 2.3.0) Frame size vs ring slot (§9).** Sized `MAX_FRAME_SIZE` to 512 kB (PSRAM: 3 slots x 512 kB = 1.5 MB of 8 MB).
 
 ## Phase 2: features that are half built
 
@@ -45,9 +37,7 @@ internal RAM. Measured on a camera, free internal heap fell from ~103 kB (2.1.0)
 
 ## Phase 3: security hardening
 
-9. **(done, unreleased) Optional auth for port 81 streams (§3).** Basic Auth or a token query
-   parameter behind a setting, off by default so existing Home Assistant / A12
-   consumers keep working; A12's detection consumer gets the credential.
+9. **(done in 2.3.0) Optional auth for port 81 streams (§3).** Basic Auth behind `stream_auth` setting, off by default so existing Home Assistant / A12 consumers keep working.
 10. **Optional certificate validation for Telegram (§4).** Use the ESP-IDF CA
     bundle behind a setting. Only after Phase 0 confirms the heap headroom: the
     handshake with validation needs more of it.
