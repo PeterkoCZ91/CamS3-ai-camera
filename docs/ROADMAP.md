@@ -4,22 +4,23 @@ What is planned next, in order. Each item names the known issue it closes
 (`docs/known_issues.md`) and how we will know it is done. This is a plan, not a
 promise; reorder freely.
 
-## Phase 0: finish the arduino-esp32 3.3.9 port (now)
+## Phase 0: the arduino-esp32 3.3.9 port (released in 2.2.0)
 
-The port to pioarduino 55.03.39 (arduino-esp32 3.3.9 / ESP-IDF 5.5.4) builds and
-boots. The prebuilt 3.3.9 core keeps Wi-Fi/lwIP buffers in internal RAM, which
-cost ~30 kB of free internal heap (largest block 85 kB -> 30 kB). The
-`idf5-hybrid` branch puts them back in PSRAM via `custom_sdkconfig`.
+The port to pioarduino 55.03.39 (arduino-esp32 3.3.9 / ESP-IDF 5.5.4) shipped in
+2.2.0. One cost remains: the prebuilt 3.3.9 core keeps Wi-Fi/lwIP buffers in
+internal RAM. Measured on a camera, free internal heap fell from ~103 kB (2.1.0) to
+~70 kB and the largest free block from ~85 kB to ~30 kB.
 
-1. **Measure the hybrid build on the device.** Done when free internal heap is
-   back near 100 kB, the largest free block near 85 kB, `psramFound()` is true,
-   and a Telegram photo plus an MQTT-over-TLS publish both succeed after 24 h.
-2. **Pick the branch and merge.** Hybrid if step 1 passes, plain `idf5`
-   otherwise. Push, and confirm the first (cold, ~10 min) CI run is green.
-3. **Release 2.2.0.** CHANGELOG entry for the core move, and how to downgrade
-   (stored secrets stay readable; partition table is unchanged).
-4. **Update stale docs.** `known_issues.md` §1, §2 and §12 still describe the
-   2.0.17 situation (for example "do not upgrade to 3.1+").
+1. **Win internal RAM back in our own code.** Move task stacks that never touch
+   flash to PSRAM (`xTaskCreatePinnedToCoreWithCaps`, allowed by
+   `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY`), and audit the other internal
+   allocations. Done when a Telegram photo and an MQTT-over-TLS publish succeed
+   reliably for 24 h.
+2. **Fallback: hybrid compile.** Rebuilding the core with
+   `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` (`custom_sdkconfig`) was tried and
+   measured at 86-93 kB heap / 41-49 kB largest block. It was not shipped because
+   it needs an older pioarduino core, pinned IDF components and much slower cold
+   builds. Revisit only if step 1 is not enough.
 
 ## Phase 1: things the new core may already fix (cheap to check)
 

@@ -106,12 +106,9 @@ survive its first detection.
 
 Train a **FOMO face model** in Edge Impulse — the same pipeline already used for
 person detection (`docs/fomo_setup.md`), just a different dataset — and run it
-through the existing `src/person_detection.cpp` machinery. That removes the `dl_lib`
-dependency completely and unblocks a future move to arduino-esp32 3.x.
-
-Do **not** upgrade the platform package to arduino-esp32 3.1+ before that migration:
-the face module stops compiling even when the feature flag is off, because the
-missing headers are still `#include`d inside the `#ifdef` branch.
+through the existing `src/person_detection.cpp` machinery. That removes the dead
+`dl_lib` code path. The firmware already runs on arduino-esp32 3.3.x (§12); until a
+FOMO face model exists, face detection is simply unavailable there.
 
 ---
 
@@ -132,8 +129,10 @@ The settings page offers nothing above 13:
 
 ### Why
 
-Above UXGA the PY260 driver in arduino-esp32 2.0.x cannot sustain capture — you get
-0 fps and a stream of `esp_camera_fb_get()` errors, not a slow-but-working stream.
+Above UXGA the PY260 driver in arduino-esp32 2.0.x could not sustain capture — you
+got 0 fps and a stream of `esp_camera_fb_get()` errors, not a slow-but-working stream.
+The firmware now runs on arduino-esp32 3.3.x (§12), whose camera driver is newer;
+whether that lifts the limit has not been tested yet, so the clamp stays.
 The note is in `include/config.h`:
 
 > `FRAMESIZE_UXGA (1600x1200)` — QSXGA is sensor-max but the PY260 driver in

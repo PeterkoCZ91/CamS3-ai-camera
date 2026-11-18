@@ -5,6 +5,31 @@ All notable changes to this firmware. Versions follow semantic versioning, where
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-11-18
+
+Moves the firmware from arduino-esp32 2.0.17 / ESP-IDF 4.4 to arduino-esp32 3.3.9 /
+ESP-IDF 5.5 (pioarduino platform 55.03.39).
+
+### Fixed
+- **Units with the MEGA_CCM sensor (PID 0x039E) did not start** ("Camera probe failed 0x105", issue #1). Only the camera driver in core 3.x can probe it. MEGA_CCM gets its own settings path (different value ranges, no raw register access) and frame sizes round down to the ones it accepts (QVGA, VGA, HD, UXGA, FHD).
+- The camera driver's internal task now has a 4 kB stack (2 kB before), the size that overflowed in the 2026-11 panics.
+
+### Added
+- **Automatic rollback of a bad update.** A new image is confirmed only after 60 s with Wi-Fi up and the camera delivering frames; a reboot before that (crash, watchdog, power cycle) makes the bootloader start the previous image again. Before, the core confirmed every image before `setup()`, so a crash-looping update stayed installed.
+
+### Changed
+- The task watchdog is reconfigured to 20 s (ESP-IDF 5 starts it at boot with 5 s; a plain init failed and silently left 5 s in force).
+- `frame_size` keeps the 2.0.x numbering in `config.json`, the API, the UI and A12; the shifted ESP-IDF 5 enum is converted at the driver.
+- `app_elf_sha256` in `/api/coredump/summary` is 8 hex digits (16 on 2.0.x).
+- Free internal heap is ~30 kB lower (the prebuilt core keeps Wi-Fi/lwIP buffers in internal RAM). Measured largest free block ~30 kB; TLS handshakes allocate in smaller pieces, but see `docs/ROADMAP.md`.
+
+### Removed
+- Face detection (`-DINCLUDE_FACE_DETECT`, off by default) cannot be built on core 3.x and stops at an `#error`; see `docs/known_issues.md` §1.
+
+### Upgrading
+- Over the air, firmware only: the partition table, `config.json`, LittleFS and the encrypted secrets in NVS are unchanged and carry over. Tested on a unit flashed with 2.1.0, including a forced rollback.
+- Building from source needs the pioarduino platform; PlatformIO downloads it from the URL in `platformio.ini`.
+
 ## [2.1.0] — 2026-11-18
 
 ### Note before downgrading
