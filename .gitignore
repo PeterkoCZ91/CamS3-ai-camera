@@ -7,7 +7,7 @@
 
 # Edge Impulse FOMO export — ~24 MB of generated SDK + one specific trained model.
 # Bring your own: see docs/fomo_setup.md.
-lib/ei-person-fomo/
+lib/ei-person-fomo
 
 # Local operator notes: keep private deployment details out of the repo
 # (addresses, credentials, site specifics).

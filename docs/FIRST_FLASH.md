@@ -45,8 +45,8 @@ git clone <repository-url> CamS3-Firmware
 cd CamS3-Firmware
 ```
 
-The first build downloads the toolchain, the pinned `espressif32@6.12.0` platform and
-the four libraries from `lib_deps` into `.pio/` — expect a few hundred MB and several
+The first build downloads the toolchain, the pioarduino platform (arduino-esp32 3.3.9) and
+the libraries from `lib_deps` into `.pio/` — expect a few hundred MB and several
 minutes once.
 
 ## 3. Provide the person detection model (or turn it off)

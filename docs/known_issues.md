@@ -18,7 +18,7 @@ Contents:
 9. [Frames larger than 256 kB are dropped](#9-frames-larger-than-256-kb-are-dropped)
 10. [Notification text is Czech only](#10-notification-text-is-czech-only)
 11. [Smaller deliberate constraints](#11-smaller-deliberate-constraints)
-12. [Toolchain is pinned and cannot be upgraded yet](#12-toolchain-is-pinned-and-cannot-be-upgraded-yet)
+12. [Toolchain: arduino-esp32 3.3.x, face detection unavailable](#12-toolchain-arduino-esp32-33x-face-detection-unavailable)
 13. [Large single flash writes can kill the chip on some boards](#13-large-single-flash-writes-can-kill-the-chip-on-some-boards)
 14. [/api/status reports configuration, not live sensor state](#14-apistatus-reports-configuration-not-live-sensor-state)
 15. [No illumination output, and auto exposure leaves faces dark against a bright background](#15-no-illumination-output-and-auto-exposure-leaves-faces-dark-against-a-bright-background)
@@ -40,7 +40,7 @@ esp-dl's old `dl_lib` API.
 **1. The dependency is dead upstream (verifiable).** The `dl_lib` API is deprecated and
 arduino-esp32 **removed these headers entirely in v3.1+**
 ([arduino-esp32#10881](https://github.com/espressif/arduino-esp32/issues/10881));
-Espressif moved to esp-dl v3.x, which takes ONNX models and is ESP-IDF-only. The pinned
+Espressif moved to esp-dl v3.x, which takes ONNX models and is ESP-IDF-only. The previously pinned
 `espressif32@6.12.0` (Arduino core 2.0.17) is the **last** version where this module
 compiles at all, and the library is unmaintained there. So this code has no future
 regardless of whether it currently works.
@@ -84,7 +84,9 @@ ship a task that panics.**
 
 ### Turning it on anyway
 
-Uncomment one line in `platformio.ini`:
+Not possible on the current toolchain (arduino-esp32 3.3.x, §12): the build stops at
+an `#error`. What follows applies only to a checkout on the old 2.0.17 core
+(`platform = espressif32@6.12.0`). There, uncomment one line in `platformio.ini`:
 
 ```ini
 -DINCLUDE_FACE_DETECT
@@ -470,23 +472,27 @@ would be locked out of their own camera.
 
 ---
 
-## 12. Toolchain is pinned and cannot be upgraded yet
+## 12. Toolchain: arduino-esp32 3.3.x, face detection unavailable
 
-`platformio.ini` pins `platform = espressif32@6.12.0`, i.e. arduino-esp32 **2.0.17**.
-This is not incidental:
+`platformio.ini` uses the pioarduino platform 55.03.39, i.e. arduino-esp32 **3.3.9**
+on ESP-IDF 5.5. The move from 2.0.17 was forced by newer Unit CamS3 5MP units that
+carry a MEGA_CCM sensor module (PID 0x039E): the esp32-camera component in 2.0.x
+cannot probe it ("Camera probe failed 0x105"), the one in 3.3.x can.
 
-* it is the last core version in which `src/face_detect.cpp` compiles at all (§1),
-  and the headers are `#include`d from inside the `#ifdef` branch, so the file breaks
-  the build on 3.1+ even with the feature flag off;
-* the PY260 driver behaviour documented in §2 is specific to the 2.0.x
-  esp32-camera component.
+What that costs and changes:
 
-Migrating to arduino-esp32 3.x therefore has a prerequisite: replace the `dl_lib`
-face detector with a FOMO face model (§1), which deletes the only blocking
-dependency. Until then, treat the pin as load-bearing.
-
-`lib_ldf_mode = deep+` is likewise required, not cosmetic — it is what lets the
-`__has_include()` shim in `src/person_detection.cpp` find the Edge Impulse library.
+* **Face detection cannot be built** (§1). esp-dl's `dl_lib` detector is gone from
+  core 3.1+; `-DINCLUDE_FACE_DETECT` now stops at an `#error` that points here. The
+  code is kept for whoever ports it to a FOMO face model.
+* **`frame_size` numbers are unchanged on the wire.** esp32-camera 3.x inserted two
+  sizes into `framesize_t`, so the driver's 13 is now HD. `config.json`, the API, the
+  UI and A12 keep the 2.0.x numbering (13 = UXGA); `cameraFrameSizeFromApi()`
+  converts at the driver boundary.
+* **MEGA_CCM sensors** take a different settings path (`applyConfigToCamera()`):
+  different value ranges, no raw register access (`/api/sensor` reports no data),
+  and only QVGA / VGA / HD / UXGA among the offered sizes — others round down.
+* `lib_ldf_mode = chain`, not `deep+`: deep+ evaluates `#if SOC_WIFI_SUPPORTED`
+  without sdkconfig.h and drops the Network library that WiFi and AsyncTCP need.
 
 ---
 

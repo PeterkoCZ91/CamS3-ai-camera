@@ -3,6 +3,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_task_wdt.h>
+#include <esp_ota_ops.h>
+#include <esp_idf_version.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "config.h"
@@ -344,6 +346,50 @@ static void healthWatchdog() {
     #endif
 }
 
+// ── OTA rollback ──────────────────────────────────────────────────────────────
+// The bootloader is built with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, but the
+// Arduino core marks a freshly flashed OTA image valid in initArduino(), *before*
+// setup() runs, so an update that crash-loops right after boot was never rolled
+// back. Overriding this weak hook (C linkage, defined in esp32-hal-misc.c on both
+// 2.0.x and 3.x) defers that decision to otaConfirmIfHealthy() below, which
+// confirms the image only after it has proved it can do its job for a while. If it
+// panics, hangs into the task watchdog or loses power before that, the bootloader
+// boots the previous slot. For a serial-flashed image the state is not
+// PENDING_VERIFY and nothing happens.
+extern "C" bool verifyRollbackLater() { return true; }
+
+static void otaConfirmIfHealthy() {
+    static bool done = false;
+    static uint32_t capturesAtStart = 0;
+    if (done || millis() < 60000) return;
+    if (capturesAtStart == 0) {
+        // First call after the 60 s grace: read the image state once (otadata lives
+        // in flash, no need to re-read it every loop).
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state;
+        if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK ||
+            state != ESP_OTA_IMG_PENDING_VERIFY) {
+            done = true;
+            return;
+        }
+        capturesAtStart = getCaptureCount() + 1;  // +1: never 0
+    }
+    // 60 s up, Wi-Fi joined, capture task still producing frames (10 more since the
+    // grace period ended). Never healthy (no Wi-Fi, no camera) means the image stays
+    // unconfirmed and the next reboot rolls it back. The viewer stream server is
+    // deliberately not a condition: it is optional (stream_url falls back to port
+    // 81), so a unit where only it failed is still a working camera.
+    // The async web server has no running flag; reaching loop() means
+    // webServerInit() has already returned.
+    if (!isWiFiConnected() || getCaptureCount() < capturesAtStart + 10) {
+        return;
+    }
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    logCapture("[OTA] New firmware passed the health window, rollback cancelled: %s\n",
+               esp_err_to_name(err));
+    done = true;
+}
+
 void setup() {
     // Set ENA + ANA_RST_EN + RST_ENA (read-modify-write, keeps the threshold/wait bits).
     // The old plain write of 0x10000 only set RST_WAIT and cleared all three, i.e. it
@@ -354,7 +400,26 @@ void setup() {
     uint32_t brownOutRegVal = REG_READ(RTC_CNTL_BROWN_OUT_REG);  // logged after logInit()
 
     // Task watchdog: 20s timeout, panic on trigger so core dump + reset happen.
-    esp_task_wdt_init(20, true);
+    // ESP-IDF 5 takes a config struct, and the core already started the TWDT at boot
+    // (CONFIG_ESP_TASK_WDT_INIT, 5 s, idle task of CPU0 subscribed). init() then
+    // fails with ESP_ERR_INVALID_STATE and leaves the 5 s timeout in force — every
+    // long camera reinit would panic. IDF 4.4's init() silently reconfigured, so
+    // reconfigure() is the equivalent; init() covers a core built without TWDT.
+    // idle_core_mask keeps CPU0's idle task watched, as the sdkconfig default did.
+    esp_err_t twdtErr;  // logged once logInit() has run
+#if ESP_IDF_VERSION_MAJOR >= 5
+    {
+        esp_task_wdt_config_t twdt = {
+            .timeout_ms = 20000,
+            .idle_core_mask = (1 << 0),
+            .trigger_panic = true,
+        };
+        twdtErr = esp_task_wdt_reconfigure(&twdt);
+        if (twdtErr == ESP_ERR_INVALID_STATE) twdtErr = esp_task_wdt_init(&twdt);
+    }
+#else
+    twdtErr = esp_task_wdt_init(20, true);  // IDF 4.4: reconfigures when already running
+#endif
     esp_task_wdt_add(NULL);  // subscribe loop task
 
     Serial.begin(115200);
@@ -367,6 +432,7 @@ void setup() {
     logCapture("  %s Firmware v%s\n", DEVICE_NAME, FIRMWARE_VERSION);
     logCapture("  M5Stack Unit CamS3 5MP\n");
     logCapture("========================================\n");
+    if (twdtErr != ESP_OK) logCapture("[WDT] Task watchdog setup failed: %s\n", esp_err_to_name(twdtErr));
     logCapture("  CPU: %dMHz, SRAM: %dKB\n", ESP.getCpuFreqMHz(), ESP.getHeapSize() / 1024);
     logCapture("  PSRAM: %s (%dMB)\n",
                   psramFound() ? "OK" : "NOT FOUND",
@@ -548,6 +614,7 @@ void loop() {
     wifiLoop();
     healthWatchdog();
     webSocketBroadcastStatus();
+    otaConfirmIfHealthy();
 
     #ifdef INCLUDE_OTA
     // ElegantOTA only *requests* the post-update reboot; the restart itself happens

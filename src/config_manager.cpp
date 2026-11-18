@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <Preferences.h>
 #include "esp_camera.h"
+#include "camera_manager.h"
 #include "board_config.h"
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
@@ -247,7 +248,7 @@ static bool validName(const String& s, bool topic) {
 void sanitizeConfig() {
     CfgLock lock;
     AppConfig& c = appConfig;
-    c.camera.frame_size   = sClampI(c.camera.frame_size, FRAMESIZE_QVGA, FRAMESIZE_UXGA);
+    c.camera.frame_size   = sClampI(c.camera.frame_size, API_FRAMESIZE_QVGA, API_FRAMESIZE_UXGA);
     c.camera.jpeg_quality = sClampI(c.camera.jpeg_quality, 4, 63);
     c.camera.brightness   = sClampI(c.camera.brightness, -2, 2);
     c.camera.contrast     = sClampI(c.camera.contrast, -2, 2);
@@ -708,8 +709,35 @@ void applyConfigToCamera(bool applyFrameSize) {
     }
 
     if (applyFrameSize) {
-        s->set_framesize(s, (framesize_t)appConfig.camera.frame_size);
+        s->set_framesize(s, cameraSupportedFrameSize(cameraFrameSizeFromApi(appConfig.camera.frame_size)));
     }
+
+    // MEGA_CCM (newer Unit CamS3 5MP units, PID 0x039E) is not an OmniVision-style
+    // sensor: its driver (esp32-camera sensors/mega_ccm.c) clamps brightness to
+    // 0..8 and contrast/saturation to 0..6 (our -2..2 would all land at the dark /
+    // flat end), routes set_aec2() to the module's auto-exposure switch, writes
+    // agc_gain/aec_value as *manual* gain/exposure, and stubs everything else with a
+    // "Unsupported" warning. So translate instead of replaying the OV3660/PY260 list.
+    // The mid-points used below (4, 3, 3) are inferred from those ranges and are
+    // UNVERIFIED on hardware.
+    if (s->id.PID == CAM_PID_MEGA_CCM) {
+        s->set_quality(s, appConfig.camera.jpeg_quality);
+        s->set_vflip(s, appConfig.camera.vflip ? 1 : 0);
+        s->set_hmirror(s, appConfig.camera.hmirror ? 1 : 0);
+        s->set_brightness(s, constrain(appConfig.camera.brightness + 4, 0, 8));
+        s->set_contrast(s, constrain(appConfig.camera.contrast + 3, 0, 6));
+        s->set_saturation(s, constrain(appConfig.camera.saturation + 3, 0, 6));
+        s->set_wb_mode(s, appConfig.camera.wb_mode);
+        bool autoExp = appConfig.camera.aec && appConfig.camera.agc;
+        s->set_aec2(s, autoExp ? 1 : 0);  // MEGA_CCM: AGC_MODE_REG, 1 = auto
+        if (!autoExp) {
+            s->set_agc_gain(s, appConfig.camera.agc_gain);
+            s->set_aec_value(s, appConfig.camera.aec_value);
+        }
+        logCapture("[%s] Camera settings applied (MEGA_CCM)\n", TAG);
+        return;
+    }
+
     s->set_quality(s, appConfig.camera.jpeg_quality);
     s->set_vflip(s, appConfig.camera.vflip ? 1 : 0);
     s->set_hmirror(s, appConfig.camera.hmirror ? 1 : 0);

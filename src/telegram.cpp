@@ -767,7 +767,7 @@ static int checkTelegramUpdates(bool discardOnly = false) {
         }
 
         // Read response stream directly into JSON parser to avoid large String alloc
-        WiFiClient* stream = http.getStreamPtr();
+        NetworkClient* stream = http.getStreamPtr();  // core 3.x: HTTPClient returns NetworkClient
         JsonDocument doc;
         if (deserializeJson(doc, *stream)) {
             http.end();

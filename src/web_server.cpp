@@ -241,6 +241,7 @@ static const char* sensorNameFromPid() {
     sensor_t* s = esp_camera_sensor_get();
     if (!s) return "unknown";
     switch (s->id.PID) {
+        case CAM_PID_MEGA_CCM: return "MEGA_CCM";  // newer 5MP units (issue #1)
         case 0x3660: return "OV3660";
         case 0x5640: return "OV5640";
         case 0x2640: return "OV2640";
@@ -687,7 +688,7 @@ static void handleApiSettings(AsyncWebServerRequest* request, uint8_t* data, siz
     const int  prevLensFov = appConfig.lens_fov_deg;
     const bool prevLenc    = appConfig.camera.lenc;
     const int  prevSharp   = appConfig.camera.sharpness;
-    if (ok("frame_size", doc["frame_size"].is<int>()))   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], FRAMESIZE_QVGA, FRAMESIZE_UXGA); needCameraApply = true; }
+    if (ok("frame_size", doc["frame_size"].is<int>()))   { appConfig.camera.frame_size   = clampInt(doc["frame_size"], API_FRAMESIZE_QVGA, API_FRAMESIZE_UXGA); needCameraApply = true; }
     if (ok("jpeg_quality", doc["jpeg_quality"].is<int>())) { appConfig.camera.jpeg_quality = clampInt(doc["jpeg_quality"], 4, 63);  needCameraApply = true; }
     if (ok("vflip", doc["vflip"].is<bool>()))       { appConfig.camera.vflip        = doc["vflip"];         needCameraApply = true; }
     if (ok("hmirror", doc["hmirror"].is<bool>()))     { appConfig.camera.hmirror      = doc["hmirror"];       needCameraApply = true; }

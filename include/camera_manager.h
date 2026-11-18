@@ -10,6 +10,21 @@ bool cameraInit();
 bool cameraDeinit();
 bool cameraReinit();
 
+// Sensor families. Unit CamS3 5MP units ship with different chips: OV3660 / PY260
+// (OmniVision-style register map) on older units, and an "MEGA_CCM" module (PID
+// 0x039E) on newer ones — a sensor behind its own microcontroller, driven through a
+// small register API with different value ranges and no raw register access. The
+// literal is used instead of MEGA_CCM_PID because esp32-camera on core 2.0.x does
+// not define it.
+#define CAM_PID_MEGA_CCM 0x039E
+bool cameraIsMegaCcm();
+// Largest frame size <= fs that the fitted sensor accepts. MEGA_CCM only takes
+// QVGA/VGA/HD/UXGA/FHD/5MP (+ small squares); anything else fails set_framesize()
+// and, at init, the whole esp_camera_init(). Identity for every other sensor.
+framesize_t cameraSupportedFrameSize(framesize_t fs);
+// API/config frame_size number (2.0.x numbering, see config.h) -> driver enum.
+framesize_t cameraFrameSizeFromApi(int v);
+
 // Frame capture (thread-safe via ring buffer)
 camera_fb_t* captureFrame();
 void releaseFrame(camera_fb_t* fb);

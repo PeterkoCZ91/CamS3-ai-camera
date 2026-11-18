@@ -14,8 +14,16 @@
 #include <esp_heap_caps.h>
 #include "esp_camera.h"
 #include "img_converters.h"
+// esp-dl's old dl_lib face detector ships only with arduino-esp32 2.0.x; core 3.1+
+// removed the headers. Fail with a pointer to the explanation instead of a bare
+// "human_face_detect_msr01.hpp: No such file". See docs/known_issues.md §1 and §12.
+#include <esp_arduino_version.h>
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+#  error "INCLUDE_FACE_DETECT needs arduino-esp32 2.0.x: HumanFaceDetectMSR01 (esp-dl dl_lib) was removed in core 3.1+. See docs/known_issues.md sections 1 and 12. Comment out -DINCLUDE_FACE_DETECT."
+#else
 #include "human_face_detect_msr01.hpp"
 #include "human_face_detect_mnp01.hpp"
+#endif
 
 #ifdef INCLUDE_SD_CARD
 #include <SD.h>

@@ -33,6 +33,14 @@
 // maximum, but the PY260 driver in arduino-esp32 2.0.17 cannot sustain capture at
 // that size (0 fps, errors) — which is why the UI only offers up to UXGA.
 // (The old comment said "QSXGA (14)"; 14 is FHD. 21 is QSXGA.)
+// frame_size in config.json, /api/settings, the UI and A12 uses the framesize_t
+// numbering of esp32-camera as shipped with arduino-esp32 2.0.x (13 = UXGA). The
+// esp32-camera in core 3.x inserted FRAMESIZE_128X128 and FRAMESIZE_320X320 into
+// the enum, shifting every size from QVGA up by two (13 became HD). The stored and
+// published numbers stay as they were; cameraFrameSizeFromApi() converts at the
+// driver boundary. Never cast appConfig.camera.frame_size to framesize_t directly.
+#define API_FRAMESIZE_QVGA   5
+#define API_FRAMESIZE_UXGA   13
 #define FB_COUNT             2
 #define JPEG_QUALITY_DEFAULT 8
 #define FRAME_SIZE_DEFAULT   13

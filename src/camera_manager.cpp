@@ -264,6 +264,44 @@ static bool initRingBuffer() {
     return true;
 }
 
+// PID of the sensor seen by the last successful init (0 = never probed). Lets a
+// reinit pick a frame size the sensor accepts before esp_camera_init() probes it.
+static uint16_t lastSensorPid = 0;
+
+bool cameraIsMegaCcm() {
+    sensor_t* s = esp_camera_sensor_get();
+    uint16_t pid = s ? s->id.PID : lastSensorPid;
+    return pid == CAM_PID_MEGA_CCM;
+}
+
+framesize_t cameraFrameSizeFromApi(int v) {
+    // Index = the 2.0.x enum value; named constants make this right on both cores.
+    static const framesize_t map[] = {
+        FRAMESIZE_96X96, FRAMESIZE_QQVGA, FRAMESIZE_QCIF, FRAMESIZE_HQVGA,
+        FRAMESIZE_240X240, FRAMESIZE_QVGA, FRAMESIZE_CIF, FRAMESIZE_HVGA,
+        FRAMESIZE_VGA, FRAMESIZE_SVGA, FRAMESIZE_XGA, FRAMESIZE_HD,
+        FRAMESIZE_SXGA, FRAMESIZE_UXGA, FRAMESIZE_FHD, FRAMESIZE_P_HD,
+        FRAMESIZE_P_3MP, FRAMESIZE_QXGA, FRAMESIZE_QHD, FRAMESIZE_WQXGA,
+        FRAMESIZE_P_FHD, FRAMESIZE_QSXGA,
+    };
+    if (v < 0 || v >= (int)(sizeof(map) / sizeof(map[0]))) return FRAMESIZE_UXGA;
+    return map[v];
+}
+
+static framesize_t megaCcmFrameSize(framesize_t fs) {
+    // Round down to a size the MEGA_CCM firmware accepts (esp32-camera
+    // sensors/mega_ccm.c set_framesize). Portrait/odd sizes above FHD go to FHD.
+    if (fs >= FRAMESIZE_FHD)  return FRAMESIZE_FHD;
+    if (fs >= FRAMESIZE_UXGA) return FRAMESIZE_UXGA;
+    if (fs >= FRAMESIZE_HD)   return FRAMESIZE_HD;
+    if (fs >= FRAMESIZE_VGA)  return FRAMESIZE_VGA;
+    return FRAMESIZE_QVGA;
+}
+
+framesize_t cameraSupportedFrameSize(framesize_t fs) {
+    return cameraIsMegaCcm() ? megaCcmFrameSize(fs) : fs;
+}
+
 bool cameraInit() {
     ensureMutexes();  // best effort; cameraDecodeLock() NULL-guards
     camera_config_t config;
@@ -293,7 +331,7 @@ bool cameraInit() {
 
     // Use PSRAM for frame buffers
     if (psramFound()) {
-        config.frame_size   = (framesize_t)appConfig.camera.frame_size;
+        config.frame_size   = cameraSupportedFrameSize(cameraFrameSizeFromApi(appConfig.camera.frame_size));
         config.jpeg_quality = appConfig.camera.jpeg_quality;
         config.fb_count     = FB_COUNT;
         config.fb_location  = CAMERA_FB_IN_PSRAM;
@@ -307,7 +345,9 @@ bool cameraInit() {
     }
 
     // Silence the driver's own logging before it starts cam_task. cam_task runs on a
-    // 2 kB stack fixed inside the prebuilt esp32-camera library, and its ESP_LOGE
+    // stack fixed inside the prebuilt esp32-camera library (CONFIG_CAMERA_TASK_STACK_SIZE:
+    // 2 kB on core 2.0.x, 4 kB on 3.3.x — the bigger stack probably fits a log call,
+    // but this stays as cheap insurance), and its ESP_LOGE
     // calls (FBQ-RCV / FBQ-SND / FB-SIZE when the frame queue backs up) go through
     // the esp-insights log hook and newlib vprintf, which together need more than
     // that. The core dump of the recurring 2026-11 panics showed exactly this:
@@ -318,6 +358,16 @@ bool cameraInit() {
     esp_log_level_set("cam_hal", ESP_LOG_NONE);
 
     esp_err_t err = esp_camera_init(&config);
+    // First boot of a MEGA_CCM unit: the PID is unknown until the probe, so a saved
+    // SVGA/XGA/SXGA size fails set_framesize() and with it the whole init. The failed
+    // init has already torn itself down; retry once with a size every sensor takes.
+    if (err == ESP_ERR_CAMERA_FAILED_TO_SET_FRAME_SIZE &&
+        megaCcmFrameSize(config.frame_size) != config.frame_size) {
+        logCapture("[%s] Frame size %d rejected by sensor, retrying with %d\n", TAG,
+                   (int)config.frame_size, (int)megaCcmFrameSize(config.frame_size));
+        config.frame_size = megaCcmFrameSize(config.frame_size);
+        err = esp_camera_init(&config);
+    }
     if (err != ESP_OK) {
         logCapture("[%s] Camera init failed: 0x%x\n", TAG, err);
         return false;
@@ -327,6 +377,7 @@ bool cameraInit() {
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
         logCapture("[%s] Sensor PID: 0x%04X\n", TAG, s->id.PID);
+        lastSensorPid = s->id.PID;
     }
 
     // Apply saved settings
